@@ -146,9 +146,7 @@ export function AdminLogin({
                 className="w-full rounded-2xl border border-white/10 bg-black/40 px-4 py-3 text-sm focus:border-emerald-400/70 focus:outline-none"
                 disabled={status !== 'idle' && step === 'email'}
               />
-              <p className="text-xs text-white/40">
-                Use one of the approved admin emails ({allowedEmails.join(', ')}).
-              </p>
+              {/* Guidance text intentionally minimal to keep the allowlist private. */}
             </div>
 
             {step === 'otp' && (
