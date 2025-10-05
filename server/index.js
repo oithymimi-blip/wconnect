@@ -130,6 +130,21 @@ function clearSessionCookie(res) {
   })
 }
 
+function hydrateAdminSession(req, res) {
+  purgeExpiredSessions()
+  const sessionId = req.cookies?.[SESSION_COOKIE_NAME]
+  if (!sessionId) return null
+  const session = refreshSession(sessionId, SESSION_TTL_MS)
+  if (!session) {
+    clearSessionCookie(res)
+    return null
+  }
+  setSessionCookie(res, sessionId)
+  req.adminEmail = session.email
+  res.locals.adminEmail = session.email
+  return session
+}
+
 function maskEmail(email) {
   const [user, domain] = email.split('@')
   if (!domain) return email
@@ -190,19 +205,10 @@ function unauthorized(res) {
 }
 
 function requireAdmin(req, res, next) {
-  purgeExpiredSessions()
-  const sessionId = req.cookies?.[SESSION_COOKIE_NAME]
-  if (!sessionId) {
-    return unauthorized(res)
-  }
-  const session = refreshSession(sessionId, SESSION_TTL_MS)
+  const session = hydrateAdminSession(req, res)
   if (!session) {
-    clearSessionCookie(res)
     return unauthorized(res)
   }
-  setSessionCookie(res, sessionId)
-  req.adminEmail = session.email
-  res.locals.adminEmail = session.email
   next()
 }
 
@@ -306,7 +312,8 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ status: 'signed_out' })
 })
 
-app.post('/api/events', requireAdmin, (req, res) => {
+app.post('/api/events', (req, res) => {
+  const adminSession = hydrateAdminSession(req, res)
   const { type, address, metadata, timestamp } = req.body ?? {}
   if (!type || (type !== 'connect' && type !== 'approve')) {
     return res.status(400).json({ error: 'Invalid "type" supplied.' })
@@ -322,7 +329,7 @@ app.post('/api/events', requireAdmin, (req, res) => {
         console.warn('Failed to send approval notification', err)
       })
     }
-    res.status(201).json({ status: 'stored' })
+    res.status(201).json({ status: 'stored', scope: adminSession ? 'admin' : 'public' })
   } catch (error) {
     console.error('Failed to store event', error)
     res.status(500).json({ error: 'Failed to store event.' })
