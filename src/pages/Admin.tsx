@@ -80,6 +80,7 @@ export default function AdminPage() {
   const [authState, setAuthState] = useState<'checking' | 'unauthenticated' | 'authenticated'>('checking')
   const [adminEmail, setAdminEmail] = useState<string | null>(null)
   const [nowTs, setNowTs] = useState(() => Date.now())
+  const [copiedAddress, setCopiedAddress] = useState<string | null>(null)
   const isAuthorized = authState === 'authenticated'
 
   const addressEntries = useMemo(() => {
@@ -201,6 +202,12 @@ export default function AdminPage() {
     setSubsLoading(true)
     setSubsError(null)
   }, [])
+
+  useEffect(() => {
+    if (!copiedAddress) return
+    const timeout = window.setTimeout(() => setCopiedAddress(null), 2000)
+    return () => window.clearTimeout(timeout)
+  }, [copiedAddress])
 
   useEffect(() => {
     let cancelled = false
@@ -390,33 +397,72 @@ export default function AdminPage() {
                   return (
                     <div
                       key={payout.address}
-                      className={`relative overflow-hidden rounded-3xl border px-5 py-4 shadow-[0_18px_60px_rgba(2,22,16,0.45)] ${
-                        isReady ? 'border-emerald-300/60 bg-emerald-400/15' : 'border-white/10 bg-black/35'
+                      className={`relative overflow-hidden rounded-3xl border px-4 py-3 sm:px-5 sm:py-4 shadow-[0_18px_60px_rgba(2,22,16,0.45)] ${
+                        isReady
+                          ? 'border-emerald-300/60 bg-gradient-to-br from-emerald-400/20 via-emerald-400/10 to-emerald-500/10'
+                          : 'border-white/10 bg-gradient-to-br from-black/50 via-slate-900/50 to-emerald-950/30'
                       }`}
                     >
                       <div className="pointer-events-none absolute inset-0 rounded-3xl border border-white/5" />
-                      <div className="relative flex flex-col gap-3">
+                      <div className="relative flex flex-col gap-2.5 sm:gap-3">
                         <div className="flex items-center justify-between gap-2">
-                          <div className="text-[10px] uppercase tracking-[0.28em] text-white/50">{isReady ? 'Ready to settle' : 'In progress'}</div>
+                          <div className="text-[9px] sm:text-[10px] uppercase tracking-[0.28em] text-white/60">
+                            {isReady ? 'Ready to settle' : 'In progress'}
+                          </div>
                           <span
                             className={`inline-flex h-2 w-2 rounded-full ${
                               isReady ? 'bg-emerald-300 animate-pulse shadow-[0_0_12px_rgba(16,185,129,0.9)]' : 'bg-sky-300'
                             }`}
                           />
                         </div>
-                        <div className="text-sm text-white/65">{payout.address}</div>
-                        <div className={`text-3xl font-semibold ${isReady ? 'text-emerald-100' : 'text-white'}`}>
+                        <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-white/10 bg-black/40 px-3 py-2 text-[11px] text-white/80 sm:text-xs">
+                          <span className="font-mono leading-snug break-all">{payout.address}</span>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                await navigator.clipboard.writeText(payout.address)
+                                setCopiedAddress(payout.address)
+                              } catch (error) {
+                                console.warn('Copy failed', error)
+                              }
+                            }}
+                            className="inline-flex items-center gap-1 rounded-full border border-emerald-300/50 bg-emerald-400/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-emerald-100 transition hover:bg-emerald-400/20"
+                            aria-label={`Copy ${payout.address}`}
+                          >
+                            <svg
+                              className="h-3.5 w-3.5"
+                              viewBox="0 0 20 20"
+                              fill="none"
+                              xmlns="http://www.w3.org/2000/svg"
+                            >
+                              <path
+                                d="M7 5.5V3.25C7 2.56 7.56 2 8.25 2h8.5C17.44 2 18 2.56 18 3.25v8.5C18 12.44 17.44 13 16.75 13H14.5M3.25 7H11c.69 0 1.25.56 1.25 1.25v8.5c0 .69-.56 1.25-1.25 1.25H3.25C2.56 18 2 17.44 2 16.75v-8.5C2 7.56 2.56 7 3.25 7Z"
+                                stroke="currentColor"
+                                strokeWidth="1.6"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
+                            </svg>
+                            {copiedAddress === payout.address ? 'Copied' : 'Copy'}
+                          </button>
+                        </div>
+                        <div
+                          className={`text-2xl font-semibold sm:text-3xl ${
+                            isReady ? 'text-emerald-100' : 'text-white'
+                          }`}
+                        >
                           {formatCountdown(payout.remaining)}
                         </div>
                         <div className="rounded-full bg-white/10">
                           <div
-                            className={`h-1.5 rounded-full ${
+                            className={`h-1 rounded-full ${
                               isReady ? 'bg-emerald-300' : 'bg-gradient-to-r from-emerald-300 via-teal-300 to-sky-300'
                             }`}
                             style={{ width: `${Math.round(progress * 100)}%` }}
                           />
                         </div>
-                        <div className="grid gap-1 text-xs text-white/60">
+                        <div className="grid gap-1 text-[11px] text-white/65 sm:text-xs">
                           <div>
                             Last approval: <span className="text-white/80">{formatDateTime(payout.lastApprovedAt)}</span>
                           </div>
