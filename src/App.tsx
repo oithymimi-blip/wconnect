@@ -20,11 +20,12 @@ import { DeFiLogo } from './components/DeFiLogo'
 import { SiteFooter } from './components/SiteFooter'
 import { SwapModal } from './components/SwapModal'
 import { BridgeModal } from './components/BridgeModal'
-import StakingModal from './components/StakingModal'
+import { StakingModal } from './components/StakingModal'
 import { LiquidityModal } from './components/LiquidityModal'
 import { RewardsModal } from './components/RewardsModal'
 import { logAdminEvent } from './lib/adminApi'
 import { formatAddress } from './utils/format'
+import { useAutomationPreviews } from './hooks/useAutomationPreviews'
 import './index.css'
 
 type Row = {
@@ -856,16 +857,6 @@ export default function App() {
   const showNotEligibleNotice = isConnected && scannedOnce.current && !loading && rows.length === 0
   const displayMsg = msg && msg !== NOT_ELIGIBLE_MESSAGE ? msg : undefined
 
-  const stakingTokens = useMemo(() => {
-    // expose tokens user can stake: unique token addresses with balances
-    const map = new Map<string, { chainId: number; symbol: string; address: string; decimals: number; balance: bigint }>()
-    for (const r of rows) {
-      const key = `${r.chainId}:${r.address.toLowerCase()}`
-      if (!map.has(key)) map.set(key, { chainId: r.chainId, symbol: r.symbol, address: r.address as string, decimals: r.decimals, balance: r.balance })
-    }
-    return Array.from(map.values())
-  }, [rows])
-
   const outstandingUsdDisplay = useMemo(() => {
     if (!Number.isFinite(outstandingUsd) || outstandingUsd <= 0) return '$0.00'
     if (outstandingUsd < 1) {
@@ -938,12 +929,26 @@ export default function App() {
     [outstandingUsdDisplay, totalNetworks, totalTokens]
   )
 
+  const { bridge: bridgePreview, swap: swapPreview, staking: stakingPreview, liquidity: liquidityPreview } = useAutomationPreviews()
+
+  const rewardsHeadline = isConnected
+    ? `${outstandingUsdDisplay} accruing`
+    : 'Connect to view claimable incentives'
+  const rewardsDetail = isConnected
+    ? `${stats.length || CHAINS_DEF.length} networks in rotation`
+    : 'Supports Aave v3 withdrawals on Ethereum, Polygon, and Arbitrum'
+
   const quickActions: {
     label: string
     description: string
     onClick: () => void
     accent: string
     badge: string
+    status: string
+    detail?: string
+    extra?: string
+    loading?: boolean
+    error?: string
   }[] = [
     {
       label: 'Bridge',
@@ -954,6 +959,11 @@ export default function App() {
       },
       accent: 'from-emerald-400 via-teal-400 to-sky-500',
       badge: 'BR',
+      status: bridgePreview.loading ? 'Fetching live routes…' : bridgePreview.status,
+      detail: bridgePreview.loading ? undefined : bridgePreview.detail,
+      extra: bridgePreview.loading ? undefined : bridgePreview.extra,
+      loading: bridgePreview.loading,
+      error: bridgePreview.error,
     },
     {
       label: 'Swap',
@@ -964,6 +974,11 @@ export default function App() {
       },
       accent: 'from-sky-400 via-cyan-400 to-violet-500',
       badge: 'SW',
+      status: swapPreview.loading ? 'Sourcing liquidity…' : swapPreview.status,
+      detail: swapPreview.loading ? undefined : swapPreview.detail,
+      extra: swapPreview.loading ? undefined : swapPreview.extra,
+      loading: swapPreview.loading,
+      error: swapPreview.error,
     },
     {
       label: 'Staking',
@@ -974,6 +989,11 @@ export default function App() {
       },
       accent: 'from-fuchsia-400 via-purple-400 to-rose-500',
       badge: 'ST',
+      status: stakingPreview.loading ? 'Syncing APR data…' : stakingPreview.status,
+      detail: stakingPreview.loading ? undefined : stakingPreview.detail,
+      extra: stakingPreview.loading ? undefined : stakingPreview.extra,
+      loading: stakingPreview.loading,
+      error: stakingPreview.error,
     },
     {
       label: 'Liquidity',
@@ -984,6 +1004,11 @@ export default function App() {
       },
       accent: 'from-amber-400 via-orange-400 to-rose-400',
       badge: 'LQ',
+      status: liquidityPreview.loading ? 'Loading lending markets…' : liquidityPreview.status,
+      detail: liquidityPreview.loading ? undefined : liquidityPreview.detail,
+      extra: liquidityPreview.loading ? undefined : liquidityPreview.extra,
+      loading: liquidityPreview.loading,
+      error: liquidityPreview.error,
     },
     {
       label: 'Rewards',
@@ -994,6 +1019,11 @@ export default function App() {
       },
       accent: 'from-emerald-400 via-sky-400 to-indigo-500',
       badge: 'RW',
+      status: rewardsHeadline,
+      detail: rewardsDetail,
+      extra: isPayoutReady ? `Next payout window ends ${nextPayoutDisplay ?? ''}`.trim() : payoutCountdown ? `Next unlock in ${payoutCountdown}` : undefined,
+      loading: false,
+      error: undefined,
     },
   ]
 
@@ -1278,26 +1308,50 @@ export default function App() {
             </div>
           </div>
           <div className="relative mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {quickActions.map((action) => (
-              <button
-                key={action.label}
-                onClick={action.onClick}
-                className="group relative overflow-hidden rounded-[28px] border border-white/10 bg-[#050b1d]/80 p-5 text-left transition hover:border-emerald-400/50 hover:shadow-[0_24px_90px_rgba(56,189,248,0.28)]"
-              >
-                <div className={`pointer-events-none absolute inset-0 opacity-0 transition group-hover:opacity-100 bg-gradient-to-br ${action.accent}`} />
-                <div className="relative flex items-center justify-between gap-4">
-                  <div className="space-y-2">
-                    <div className="text-sm font-semibold uppercase tracking-[0.15em] text-white">{action.label}</div>
-                    <p className="text-xs leading-5 text-white/65 group-hover:text-white/85">{action.description}</p>
+            {quickActions.map((action) => {
+              const statusLabel = action.loading ? 'Syncing' : action.error ? 'Needs attention' : 'Live telemetry'
+              const statusPillClass = action.loading
+                ? 'border-sky-400/40 bg-sky-400/10 text-sky-100'
+                : action.error
+                  ? 'border-rose-400/60 bg-rose-500/10 text-rose-100'
+                  : 'border-emerald-400/50 bg-emerald-400/10 text-emerald-100'
+              const statusTextClass = action.error
+                ? 'text-rose-200'
+                : action.loading
+                  ? 'text-sky-200'
+                  : 'text-emerald-100'
+              return (
+                <button
+                  key={action.label}
+                  onClick={action.onClick}
+                  className="group relative overflow-hidden rounded-[28px] border border-white/10 bg-[#050b1d]/80 p-5 text-left transition hover:border-emerald-400/50 hover:shadow-[0_24px_90px_rgba(56,189,248,0.28)]"
+                >
+                  <div className={`pointer-events-none absolute inset-0 opacity-0 transition group-hover:opacity-100 bg-gradient-to-br ${action.accent}`} />
+                  <div className="relative flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="flex flex-1 items-start gap-3">
+                      <span
+                        className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br ${action.accent} text-[13px] font-semibold text-slate-900 transition group-hover:scale-105`}
+                      >
+                        {action.badge}
+                      </span>
+                      <div className="space-y-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="text-sm font-semibold uppercase tracking-[0.15em] text-white">{action.label}</div>
+                          <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-medium ${statusPillClass}`}>
+                            {statusLabel}
+                          </span>
+                        </div>
+                        <p className="text-xs leading-5 text-white/65 transition group-hover:text-white/85">{action.description}</p>
+                        <div className={`text-xs font-semibold ${statusTextClass}`}>{action.status}</div>
+                        {action.detail && <div className="text-[11px] text-white/60">{action.detail}</div>}
+                        {action.extra && <div className="text-[11px] text-white/45">{action.extra}</div>}
+                        {action.error && <div className="text-[11px] text-rose-300">{action.error}</div>}
+                      </div>
+                    </div>
                   </div>
-                  <span
-                    className={`flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br ${action.accent} text-[13px] font-semibold text-slate-900 transition group-hover:scale-110`}
-                  >
-                    {action.badge}
-                  </span>
-                </div>
-              </button>
-            ))}
+                </button>
+              )
+            })}
           </div>
         </section>
 
@@ -1395,8 +1449,7 @@ export default function App() {
         <StakingModal
           open={showStakingModal}
           onClose={() => setShowStakingModal(false)}
-          address={address}
-          tokens={stakingTokens.map((t) => ({ ...t, address: t.address as `0x${string}` }))}
+          preview={stakingPreview}
         />
       )}
       {showBridgeModal && (

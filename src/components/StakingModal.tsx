@@ -1,268 +1,296 @@
 import { useEffect, useMemo, useState } from 'react'
-import { formatUnits } from 'viem'
+import { useAccount, useBalance, useChainId, useSendTransaction, useSwitchChain } from 'wagmi'
+import { encodeFunctionData, parseUnits, type Address } from 'viem'
+import type { ModulePreview } from '../hooks/useAutomationPreviews'
+
+const LIDO_STAKING_ADDRESS = '0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84' as const satisfies Address
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as const satisfies Address
+const ETHEREUM_MAINNET_ID = 1
+
+const LIDO_STAKING_ABI = [
+  {
+    name: 'submit',
+    type: 'function',
+    stateMutability: 'payable',
+    inputs: [{ name: '_referral', type: 'address' }],
+    outputs: [{ type: 'uint256' }],
+  },
+] as const
 
 type Props = {
   open: boolean
   onClose: () => void
-  address?: string | null
-  tokens: { chainId: number; symbol: string; address: `0x${string}`; decimals: number; balance: bigint }[]
+  preview?: ModulePreview
 }
 
-type StakeRecord = {
-  id: string
-  chainId: number
-  token: string
-  tokenSymbol?: string
-  amount: string // base units
-  decimals: number
-  apr: number // e.g. 0.12 for 12% APR
-  start: number // epoch ms
+function trimAmount(value: number) {
+  if (value <= 0) return ''
+  if (value >= 1) return value.toFixed(4).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1')
+  return value.toPrecision(4)
 }
 
-const STAKES_KEY = 'qa:stakes_v1'
-
-function uuid() {
-  return Math.random().toString(36).slice(2, 9)
+function isAddress(value: string) {
+  return /^0x[a-fA-F0-9]{40}$/.test(value)
 }
 
-function formatUsd(n: number) {
-  return '$' + n.toLocaleString(undefined, { maximumFractionDigits: 2 })
-}
+export function StakingModal({ open, onClose, preview }: Props) {
+  const { address, isConnected } = useAccount()
+  const activeChainId = useChainId()
+  const { switchChainAsync, isPending: isSwitching } = useSwitchChain()
+  const { sendTransactionAsync, isPending: isSubmitting } = useSendTransaction()
 
-export function StakingModal({ open, onClose, address, tokens }: Props) {
-  const [selected, setSelected] = useState<string | null>(null)
-  const [amount, setAmount] = useState('')
-  const [apr, setApr] = useState(0.12)
-  const [horizon, setHorizon] = useState(30)
-  const [stakes, setStakes] = useState<StakeRecord[]>([])
-  const [info, setInfo] = useState<string | null>(null)
-  const [demoMode, setDemoMode] = useState(false)
+  const [amountInput, setAmountInput] = useState('')
+  const [referralInput, setReferralInput] = useState('')
+  const [statusMessage, setStatusMessage] = useState<string | null>(null)
+  const [txHash, setTxHash] = useState<string | null>(null)
 
   useEffect(() => {
     if (!open) return
-    // load existing stakes for this address
-    try {
-      const raw = localStorage.getItem(STAKES_KEY)
-      if (raw) setStakes(JSON.parse(raw) as StakeRecord[])
-    } catch {
-      setStakes([])
-    }
+    setAmountInput('')
+    setReferralInput('')
+    setStatusMessage(null)
+    setTxHash(null)
   }, [open])
 
-  // when wallet connects, exit demo mode automatically
-  useEffect(() => {
-    if (address) setDemoMode(false)
-  }, [address])
+  const balance = useBalance({
+    address,
+    unit: 'ether',
+    query: {
+      enabled: Boolean(open && address),
+      refetchInterval: open ? 20_000 : false,
+    },
+  })
 
-
-  
-  const demoTokens: { chainId: number; symbol: string; address: `0x${string}`; decimals: number; balance: bigint }[] = [
-    { chainId: 1, symbol: 'USDC', address: '0x0000000000000000000000000000000000000001', decimals: 6, balance: 1000n * 10n ** 6n },
-    { chainId: 1, symbol: 'DAI', address: '0x0000000000000000000000000000000000000002', decimals: 18, balance: 12n * 10n ** 18n },
-    { chainId: 137, symbol: 'WMATIC', address: '0x0000000000000000000000000000000000000003', decimals: 18, balance: 50n * 10n ** 18n },
-  ]
-
-  const tokensToShow = demoMode ? demoTokens : tokens
-
-  const optionsToShow = useMemo(() => tokensToShow.map((t) => ({ key: `${t.chainId}:${t.address}`, label: `${t.symbol} · ${Number(formatUnits(t.balance as any, t.decimals))} on ${t.chainId}`, ...t })), [tokensToShow])
-  const selectedToken = optionsToShow.find((o) => o.key === selected) ?? optionsToShow[0]
-
-  const maxHuman = selectedToken ? Number(formatUnits(selectedToken.balance as any, selectedToken.decimals)) : 0
-  const humanAmount = Number(amount || '0')
-  const projection = selectedToken && humanAmount > 0 ? (function () {
-    const P = humanAmount
-    const r = apr
-    const n = 365
-    const t = horizon / 365
-    const A = P * Math.pow(1 + r / n, n * t)
-    return { payout: A, profit: A - P }
-  })() : null
-
-  // initialize selected token when token list changes
-  useEffect(() => {
-    if (!optionsToShow || optionsToShow.length === 0) { setSelected(null); return }
-    setSelected((prev) => prev ?? optionsToShow[0].key)
-  }, [optionsToShow])
-
-  function saveAll(next: StakeRecord[]) {
+  const amountValue = useMemo(() => {
+    if (!amountInput) return null
     try {
-      localStorage.setItem(STAKES_KEY, JSON.stringify(next))
-    } catch {}
-    setStakes(next)
-  }
-
-  function handleStake() {
-    if (!selectedToken || !address) return
-    const human = Number(amount)
-    if (!human || human <= 0) return
-    // convert to base units string for simplicity
-    const base = (BigInt(Math.floor(human * 10 ** selectedToken.decimals))).toString()
-    const rec: StakeRecord = {
-      id: uuid(),
-      chainId: selectedToken.chainId,
-      token: selectedToken.address,
-      tokenSymbol: selectedToken.symbol,
-      amount: base,
-      decimals: selectedToken.decimals,
-      apr,
-      start: Date.now(),
+      const parsed = parseUnits(amountInput, 18)
+      return parsed > 0n ? parsed : null
+    } catch {
+      return null
     }
-    const next = [rec, ...stakes]
-    saveAll(next)
-    setAmount('')
+  }, [amountInput])
+
+  const referralAddress = useMemo(() => {
+    if (!referralInput) return ZERO_ADDRESS
+    const trimmed = referralInput.trim()
+    return isAddress(trimmed) ? (trimmed as Address) : null
+  }, [referralInput])
+
+  const formattedBalance = balance.data ? Number(balance.data.formatted) : 0
+  const estimatedStEth = amountInput && Number(amountInput) > 0 ? `${amountInput} stETH (≈)` : '—'
+
+  const canStake = Boolean(
+    isConnected &&
+      amountValue &&
+      amountValue > 0n &&
+      referralAddress !== null &&
+      !isSubmitting &&
+      !isSwitching,
+  )
+
+  const needsChainSwitch = isConnected && activeChainId !== ETHEREUM_MAINNET_ID
+
+  const handleSetMax = () => {
+    if (!formattedBalance || formattedBalance <= 0) return
+    // leave a small buffer for gas
+    const safe = Math.max(0, formattedBalance - 0.003)
+    setAmountInput(trimAmount(safe))
   }
 
-  // auto clear small info messages after a few seconds
-  useEffect(() => {
-    if (!info) return
-    const t = setTimeout(() => setInfo(null), 4000)
-    return () => clearTimeout(t)
-  }, [info])
+  const handleStake = async () => {
+    if (!address) {
+      setStatusMessage('Connect your wallet to stake with Lido.')
+      return
+    }
+    if (!amountValue || amountValue <= 0n) {
+      setStatusMessage('Enter an amount of ETH to stake.')
+      return
+    }
+    if (!referralAddress) {
+      setStatusMessage('Referral must be a valid address (or leave blank).')
+      return
+    }
 
-  function computePayout(rec: StakeRecord, days = 30) {
-    // simple daily compounding
-    const P = Number(rec.amount) / 10 ** rec.decimals
-    const r = rec.apr
-    const n = 365 // daily comp
-    const t = days / 365
-    const A = P * Math.pow(1 + r / n, n * t)
-    return { principal: P, payout: A, profit: A - P }
-  }
+    setStatusMessage(null)
+    setTxHash(null)
 
-  function handleClaim(id: string) {
-    const next = stakes.filter((s) => s.id !== id)
-    saveAll(next)
+    try {
+      if (activeChainId !== ETHEREUM_MAINNET_ID) {
+        await switchChainAsync({ chainId: ETHEREUM_MAINNET_ID })
+      }
+
+      const data = encodeFunctionData({
+        abi: LIDO_STAKING_ABI,
+        functionName: 'submit',
+        args: [referralAddress],
+      })
+
+      const hash = await sendTransactionAsync({
+        chainId: ETHEREUM_MAINNET_ID,
+        to: LIDO_STAKING_ADDRESS,
+        data,
+        value: amountValue,
+      })
+
+      setTxHash(hash)
+      setStatusMessage('Stake submitted. stETH will appear after the transaction confirms.')
+      setAmountInput('')
+      await balance.refetch?.()
+    } catch (error: any) {
+      setStatusMessage(error?.message ?? 'Stake failed')
+    }
   }
 
   if (!open) return null
 
+  const aprSummary = preview && !preview.loading ? preview.status : 'Live APR sync'
+  const aprDetail = preview && !preview.loading ? preview.detail : undefined
+
   return (
-    <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/60">
-      <div className="w-full max-w-2xl rounded-2xl bg-[#07101a] border border-white/10 p-6">
-        <div className="flex items-start justify-between">
-          <div>
-            <h3 className="text-lg font-semibold">Staking Vault</h3>
-            <div className="text-sm text-white/60">Stake supported tokens to earn deterministic APR with daily compounding.</div>
-            <div className="mt-3 text-xs text-white/60">Quick guide: 1) Connect wallet or use Demo mode 2) Choose token and amount 3) Adjust APR/horizon to preview earnings 4) Click Stake</div>
+    <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/70 px-4 backdrop-blur-sm">
+      <div className="w-full max-w-3xl space-y-6 rounded-3xl border border-white/10 bg-[#08111d] p-6 text-white/90 shadow-[0_28px_100px_rgba(6,12,36,0.65)]">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="space-y-3">
+            <span className="text-[11px] uppercase tracking-[0.35em] text-emerald-200">Staking</span>
+            <h3 className="text-2xl font-semibold text-white">Stake ETH for stETH via Lido</h3>
+            <p className="text-sm text-white/65">
+              Route deposits directly to the Lido staking contract. Funds remain in your wallet as stETH and accrue yield
+              continuously.
+            </p>
           </div>
-          <div>
-            <button onClick={onClose} className="px-3 py-2 rounded-xl bg-white/5">Close</button>
+          <button
+            onClick={onClose}
+            className="self-start rounded-2xl border border-white/20 px-3 py-1.5 text-sm text-white/70 transition hover:border-white/40 hover:text-white"
+          >
+            Close
+          </button>
+        </div>
+
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+            <div className="text-xs uppercase tracking-[0.3em] text-white/50">Network</div>
+            <div className="mt-2 flex items-center justify-between">
+              <div className="text-sm font-semibold text-white">Ethereum Mainnet</div>
+              {needsChainSwitch && (
+                <span className="rounded-full border border-amber-400/50 bg-amber-500/10 px-2 py-1 text-[10px] uppercase tracking-[0.2em] text-amber-200">
+                  Switch needed
+                </span>
+              )}
+            </div>
+            <div className="mt-3 text-xs text-white/55">
+              Deposits require ETH and will mint stETH at the current beacon chain exchange rate.
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-white/70">
+            <div className="text-xs uppercase tracking-[0.3em] text-white/45">Live metrics</div>
+            <div className="mt-2 text-white">
+              {aprSummary}
+              {aprDetail && <span className="block text-xs text-white/55">{aprDetail}</span>}
+            </div>
+            <ul className="mt-3 space-y-1 text-xs leading-relaxed text-white/55">
+              <li>• stETH is liquid and can be used across DeFi.</li>
+              <li>• Unstaking requires a withdrawal request via Lido.</li>
+              <li>• Gas usage averages 120k–150k units.</li>
+            </ul>
           </div>
         </div>
 
-        <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
-          <div className="space-y-2">
-            {tokensToShow.length === 0 && (
-              <div className="rounded-xl border border-white/8 bg-white/3 p-3 text-sm">
-                <div className="font-semibold">No tokens detected</div>
-                <div className="text-xs text-white/60">No token balances were found for your connected wallet.</div>
-                <div className="mt-2 flex gap-2">
-                  <button onClick={() => setDemoMode(true)} className="px-3 py-2 rounded-xl bg-emerald-500/90 text-black font-semibold">Use Demo Mode</button>
-                  {!address ? (
-                    <button onClick={() => { setInfo('Connect your wallet from the header to load real balances') }} className="px-3 py-2 rounded-xl bg-white/5">How to connect</button>
-                  ) : (
-                    <button onClick={() => { window.dispatchEvent(new Event('qa:rescan')); setInfo('Rescan requested — check the header Rescan button') }} className="px-3 py-2 rounded-xl bg-white/5">Rescan</button>
-                  )}
-                </div>
-              </div>
-            )}
-
-            <label className="text-xs text-white/60">Token</label>
-            <select value={selected ?? (optionsToShow[0]?.key ?? '')} onChange={(e) => setSelected(e.target.value)} className="w-full rounded-xl bg-white/5 p-2">
-              {optionsToShow.map((o) => (
-                <option key={o.key} value={o.key}>{o.label}</option>
-              ))}
-            </select>
-
-            <label className="text-xs text-white/60">Amount (max {maxHuman})</label>
-            <div className="flex gap-2">
-              <input value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.0" className="flex-1 rounded-xl bg-white/5 p-2" />
-              <button
-                onClick={() => setAmount(String(maxHuman))}
-                className="px-3 py-2 rounded-xl bg-white/6 text-sm"
-              >
+        <div className="grid gap-4 md:grid-cols-[3fr_2fr]">
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+            <div className="flex items-center justify-between text-xs text-white/55">
+              <span>Wallet balance</span>
+              <button onClick={handleSetMax} className="text-emerald-300 transition hover:text-emerald-200">
                 Max
               </button>
-              <button
-                onClick={() => {
-                  if (!selectedToken) return
-                  // stake entire balance
-                  setAmount(String(Number(formatUnits(selectedToken.balance as any, selectedToken.decimals))))
-                }}
-                className="px-3 py-2 rounded-xl bg-emerald-500/80 text-black font-semibold"
-              >
-                Stake all
-              </button>
             </div>
-
-            <label className="text-xs text-white/60">APR (annual)</label>
-            <div className="flex items-center gap-3">
-              <input type="range" min={0} max={100} value={Math.round(apr * 100)} onChange={(e) => setApr(Number(e.target.value) / 100)} className="flex-1" />
-              <div className="w-20 text-right">{Math.round(apr * 100)}%</div>
+            <div className="mt-2 text-lg font-semibold text-white">
+              {formattedBalance ? `${formattedBalance.toLocaleString(undefined, { maximumFractionDigits: 4 })} ETH` : '—'}
             </div>
-
-            <div className="mt-2 flex items-center gap-2">
-              <button onClick={() => setHorizon(30)} className={`px-3 py-1 rounded-lg ${horizon===30? 'bg-emerald-500 text-black':'bg-white/5'}`}>30d</button>
-              <button onClick={() => setHorizon(90)} className={`px-3 py-1 rounded-lg ${horizon===90? 'bg-emerald-500 text-black':'bg-white/5'}`}>90d</button>
-              <button onClick={() => setHorizon(365)} className={`px-3 py-1 rounded-lg ${horizon===365? 'bg-emerald-500 text-black':'bg-white/5'}`}>365d</button>
+            <div className="mt-4 space-y-3">
+              <label className="text-xs text-white/60">Stake amount (ETH)</label>
+              <input
+                type="text"
+                inputMode="decimal"
+                autoComplete="off"
+                placeholder="0.0"
+                value={amountInput}
+                onChange={(event) => setAmountInput(event.target.value)}
+                className="w-full rounded-2xl border border-white/15 bg-[#101a2b] px-4 py-2 text-lg font-semibold text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300"
+              />
             </div>
-
-            <div className="flex gap-2 mt-2 items-center">
-              <button
-                onClick={() => {
-                  if (!selectedToken) { setInfo('Select a token first'); return }
-                  if (humanAmount <= 0) { setInfo('Enter an amount to stake'); return }
-                  if (humanAmount > maxHuman) { setInfo('Amount exceeds balance') ; return }
-                  handleStake()
-                  setInfo('Staked — check Your Stakes on the right')
-                }}
-                className="px-4 py-2 rounded-2xl bg-emerald-500/90 text-black font-semibold"
-              >
-                Stake
-              </button>
-              <button onClick={() => { setAmount(''); setSelected(optionsToShow[0]?.key ?? null); setInfo(null) }} className="px-4 py-2 rounded-2xl bg-white/5">Reset</button>
-              <div className="text-sm text-white/60 ml-2">{info}</div>
-            </div>
-
-            {projection && (
-              <div className="mt-3 text-sm text-white/70">
-                Projection ({horizon}d): <span className="font-semibold">{formatUsd(projection.payout)}</span> (profit {formatUsd(projection.profit)})
-              </div>
-            )}
-          </div>
-
-          <div>
-            <div className="text-sm text-white/60">Your Stakes</div>
-            <div className="mt-2 space-y-2 max-h-56 overflow-auto">
-              {stakes.length === 0 ? (
-                <div className="text-sm text-white/60">No active stakes yet.</div>
-              ) : (
-                stakes.map((s) => {
-                  const days = Math.max(1, Math.round((Date.now() - s.start) / (1000 * 60 * 60 * 24)))
-                  const p = computePayout(s, days)
-                  const label = s.tokenSymbol ?? (s.token.length > 18 ? `${s.token.slice(0, 8)}...${s.token.slice(-6)}` : s.token)
-                  return (
-                    <div key={s.id} className="rounded-xl border border-white/10 p-3 bg-white/3">
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="font-semibold truncate">{label} · {s.chainId}</div>
-                          <div className="text-xs text-white/60">Staked: {(Number(s.amount) / 10 ** s.decimals).toFixed(6)}</div>
-                        </div>
-                        <div className="text-right">
-                          <div className="font-semibold">{formatUsd(p.payout)}</div>
-                          <div className="text-xs text-white/60">Profit: {formatUsd(p.profit)}</div>
-                        </div>
-                      </div>
-                      <div className="mt-2 flex justify-end gap-2">
-                        <button onClick={() => handleClaim(s.id)} className="px-3 py-1 rounded-lg bg-rose-500/80 text-black">Claim</button>
-                      </div>
-                    </div>
-                  )
-                })
+            <div className="mt-3 space-y-2">
+              <label className="text-xs text-white/60">Referral address (optional)</label>
+              <input
+                type="text"
+                placeholder="0x0000…"
+                value={referralInput}
+                onChange={(event) => setReferralInput(event.target.value)}
+                className="w-full rounded-2xl border border-white/15 bg-[#101a2b] px-4 py-2 text-sm text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300"
+              />
+              {referralInput && referralAddress === null && (
+                <div className="text-[11px] text-rose-300">Enter a valid Ethereum address or leave empty.</div>
               )}
             </div>
           </div>
+
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-white/70">
+            <div className="text-xs uppercase tracking-[0.3em] text-white/45">Stake summary</div>
+            <div className="mt-3 space-y-2 text-xs text-white/60">
+              <div className="flex items-center justify-between">
+                <span>Expected mint</span>
+                <span className="font-semibold text-white/80">{estimatedStEth}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>Gas network</span>
+                <span>Ethereum Mainnet</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>Referral</span>
+                <span>{referralAddress && referralAddress !== ZERO_ADDRESS ? referralAddress : 'None'}</span>
+              </div>
+            </div>
+            <div className="mt-4 rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-[11px] text-white/55">
+              You will receive stETH in your wallet. To exit, submit a withdrawal request on stake.lido.fi or swap stETH for
+              ETH using the Swap module.
+            </div>
+          </div>
         </div>
+
+        <div className="flex flex-wrap gap-3">
+          <button
+            onClick={handleStake}
+            disabled={!canStake}
+            className="rounded-2xl bg-gradient-to-r from-emerald-400 via-teal-400 to-sky-500 px-5 py-3 text-sm font-semibold text-black transition disabled:opacity-60"
+          >
+            {isSubmitting || isSwitching ? 'Submitting…' : 'Stake with Lido'}
+          </button>
+          <button
+            onClick={() => {
+              setAmountInput('')
+              setReferralInput('')
+              setStatusMessage(null)
+            }}
+            className="rounded-2xl border border-white/15 px-5 py-3 text-sm text-white/70 transition hover:border-white/40 hover:text-white"
+          >
+            Reset
+          </button>
+          {txHash && (
+            <a
+              href={`https://etherscan.io/tx/${txHash}`}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-2 rounded-2xl border border-sky-400/50 bg-sky-500/10 px-4 py-3 text-sm text-sky-100 transition hover:border-sky-400 hover:text-sky-50"
+            >
+              View on Etherscan
+            </a>
+          )}
+        </div>
+
+        {statusMessage && (
+          <div className="rounded-2xl border border-white/15 bg-white/10 px-4 py-3 text-sm text-white/80">{statusMessage}</div>
+        )}
       </div>
     </div>
   )
