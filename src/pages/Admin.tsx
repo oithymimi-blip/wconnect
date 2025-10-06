@@ -11,7 +11,6 @@ import {
 import { AdminLogin } from '../components/AdminLogin'
 import { fetchSession, logout as logoutSession } from '../lib/auth'
 
-const REFRESH_MS = 25000
 const DAY_MS = 24 * 60 * 60 * 1000
 
 type Tab = 'connect' | 'approve' | 'big-balance' | 'subscribers'
@@ -232,19 +231,7 @@ export default function AdminPage() {
 
   useEffect(() => {
     if (!isAuthorized) return
-    const id = setInterval(loadEvents, REFRESH_MS)
-    return () => clearInterval(id)
-  }, [isAuthorized, loadEvents])
-
-  useEffect(() => {
-    if (!isAuthorized) return
     loadSubscribers()
-  }, [isAuthorized, loadSubscribers])
-
-  useEffect(() => {
-    if (!isAuthorized) return
-    const id = setInterval(loadSubscribers, 60_000)
-    return () => clearInterval(id)
   }, [isAuthorized, loadSubscribers])
 
   useEffect(() => {
@@ -255,9 +242,6 @@ export default function AdminPage() {
   useEffect(() => {
     if (!isAuthorized) return
     refreshSnapshots()
-    if (!addressEntries.length) return
-    const id = setInterval(refreshSnapshots, REFRESH_MS)
-    return () => clearInterval(id)
   }, [addressEntries, isAuthorized, refreshSnapshots])
 
   const eventRows = useMemo(() => {
@@ -386,7 +370,7 @@ export default function AdminPage() {
                   </p>
                 </div>
                 <div className="rounded-2xl border border-emerald-300/20 bg-black/30 px-4 py-3 text-xs text-emerald-100/70">
-                  Auto-refreshes every second • {upcomingPayouts.length} wallet{upcomingPayouts.length === 1 ? '' : 's'} in cycle
+                  Reload the page to update • {upcomingPayouts.length} wallet{upcomingPayouts.length === 1 ? '' : 's'} in cycle
                 </div>
               </div>
               <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
@@ -508,7 +492,7 @@ export default function AdminPage() {
           <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
             <h2 className="text-lg font-semibold">{tabLabels[activeTab]} Activity</h2>
             <div className="text-xs text-white/50">
-              {activeRefreshing ? 'Refreshing…' : isSubscriberView ? 'Auto refresh every 60s' : `Auto refresh every ${REFRESH_MS / 1000}s`}
+              {activeRefreshing ? 'Refreshing…' : 'Reload this page to update data'}
             </div>
           </div>
           <div className="overflow-x-auto">
