@@ -219,7 +219,7 @@ export function SwapModal({ open, onClose, initialChainId }: SwapModalProps) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4">
-      <div className="w-full max-w-xl rounded-3xl border border-white/10 bg-[#0b0f1b] p-6 text-white/90 shadow-xl">
+      <div className="w-full max-w-xl max-h-[90vh] overflow-y-auto rounded-3xl border border-white/10 bg-[#0b0f1b] p-6 text-white/90 shadow-xl">
         <div className="mb-4 flex items-center justify-between">
           <div>
             <div className="text-xs uppercase tracking-[0.3em] text-white/40">Automation Module</div>
@@ -241,7 +241,7 @@ export function SwapModal({ open, onClose, initialChainId }: SwapModalProps) {
               onChange={(event) => {
                 setSelectedChainId(Number(event.target.value))
               }}
-              className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-white"
+              className="w-full rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-white"
             >
               {CHAINS_DEF.map((chain) => (
                 <option key={chain.id} value={chain.id} className="bg-[#0b0f1b]">
@@ -260,7 +260,7 @@ export function SwapModal({ open, onClose, initialChainId }: SwapModalProps) {
               step={0.05}
               value={slippage}
               onChange={(event) => setSlippage(event.target.value)}
-              className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-white"
+              className="w-full rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-white"
             />
           </label>
         </div>
@@ -285,7 +285,7 @@ export function SwapModal({ open, onClose, initialChainId }: SwapModalProps) {
                     setBuyToken(alternative ?? null)
                   }
                 }}
-                className="flex-1 rounded-2xl border border-white/10 bg-[#10172a] px-3 py-2 text-base"
+                className="w-full rounded-2xl border border-white/10 bg-[#10172a] px-3 py-2 text-base md:flex-1"
               >
                 {tokensForChain.map((token) => (
                   <option key={token.address} value={token.address} className="bg-[#0b0f1b] text-white">
@@ -299,7 +299,7 @@ export function SwapModal({ open, onClose, initialChainId }: SwapModalProps) {
                 placeholder="0.0"
                 value={sellAmountInput}
                 onChange={(event) => setSellAmountInput(event.target.value)}
-                className="flex-1 rounded-2xl border border-white/10 bg-[#10172a] px-3 py-2 text-right text-2xl font-semibold tracking-tight"
+                className="w-full rounded-2xl border border-white/10 bg-[#10172a] px-3 py-2 text-right text-2xl font-semibold tracking-tight md:flex-1"
               />
             </div>
             <div className="mt-2 flex justify-between text-xs text-white/50">
@@ -336,7 +336,7 @@ export function SwapModal({ open, onClose, initialChainId }: SwapModalProps) {
                     setSellToken(alternative ?? null)
                   }
                 }}
-                className="flex-1 rounded-2xl border border-white/10 bg-[#10172a] px-3 py-2 text-base"
+                className="w-full rounded-2xl border border-white/10 bg-[#10172a] px-3 py-2 text-base md:flex-1"
               >
                 {tokensForChain.map((token) => (
                   <option key={token.address} value={token.address} className="bg-[#0b0f1b] text-white">
@@ -344,7 +344,7 @@ export function SwapModal({ open, onClose, initialChainId }: SwapModalProps) {
                   </option>
                 ))}
               </select>
-              <div className="flex-1 rounded-2xl border border-white/10 bg-[#10172a] px-3 py-2 text-right text-2xl font-semibold tracking-tight">
+              <div className="w-full rounded-2xl border border-white/10 bg-[#10172a] px-3 py-2 text-right text-2xl font-semibold tracking-tight md:flex-1">
                 {quote && buyToken
                   ? Number(formatUnits(BigInt(quote.buyAmount), buyToken.decimals)).toLocaleString(undefined, {
                       maximumFractionDigits: 6,
@@ -385,12 +385,12 @@ export function SwapModal({ open, onClose, initialChainId }: SwapModalProps) {
           </div>
         )}
 
-        <div className="mt-6 flex flex-wrap gap-3">
+        <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:flex-wrap">
           {approvalNeeded && (
             <button
               onClick={handleApprove}
               disabled={!isConnected || isApproving}
-              className="flex-1 rounded-2xl bg-white/10 px-4 py-3 text-sm font-semibold text-white transition hover:bg-white/20 disabled:opacity-50"
+              className="w-full rounded-2xl bg-white/10 px-4 py-3 text-sm font-semibold text-white transition hover:bg-white/20 disabled:opacity-50 sm:flex-1"
             >
               {isApproving ? 'Approving…' : 'Approve Token'}
             </button>
@@ -398,13 +398,13 @@ export function SwapModal({ open, onClose, initialChainId }: SwapModalProps) {
           <button
             onClick={handleSwap}
             disabled={!isConnected || !quote || isSwapping || approvalNeeded || isQuoting || isSwitchingChain}
-            className="flex-1 rounded-2xl bg-gradient-to-r from-emerald-500 to-sky-500 px-4 py-3 text-sm font-semibold text-black transition disabled:opacity-50"
+            className="w-full rounded-2xl bg-gradient-to-r from-emerald-500 to-sky-500 px-4 py-3 text-sm font-semibold text-black transition disabled:opacity-50 sm:flex-1"
           >
             {isSwapping || isSwitchingChain ? 'Submitting…' : isQuoting ? 'Fetching quote…' : approvalNeeded ? 'Awaiting approval' : 'Execute Swap'}
           </button>
           <button
             onClick={onClose}
-            className="rounded-2xl border border-white/10 px-4 py-3 text-sm text-white/70 transition hover:border-white/40 hover:text-white"
+            className="w-full rounded-2xl border border-white/10 px-4 py-3 text-sm text-white/70 transition hover:border-white/40 hover:text-white sm:w-auto"
           >
             Cancel
           </button>

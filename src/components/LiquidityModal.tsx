@@ -117,7 +117,7 @@ export function LiquidityModal({ open, onClose }: Props) {
 
   return (
     <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4">
-      <div className="w-full max-w-2xl rounded-3xl border border-white/10 bg-[#08111d] p-6 text-white/90 shadow-[0_28px_100px_rgba(6,12,36,0.65)]">
+      <div className="w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-3xl border border-white/10 bg-[#08111d] p-6 text-white/90 shadow-[0_28px_100px_rgba(6,12,36,0.65)]">
         <div className="flex items-start justify-between gap-4">
           <div>
             <span className="text-[11px] uppercase tracking-[0.35em] text-emerald-200">Liquidity</span>
@@ -144,7 +144,7 @@ export function LiquidityModal({ open, onClose }: Props) {
                 if (first) setAssetAddress(first.address)
                 setStatusMessage(null)
               }}
-              className="rounded-2xl border border-white/15 bg-[#0d1524] px-4 py-2"
+              className="w-full rounded-2xl border border-white/15 bg-[#0d1524] px-4 py-2"
             >
               {chainOptions.map((chain) => (
                 <option key={chain.id} value={chain.id} className="bg-[#0d1524]">
@@ -162,7 +162,7 @@ export function LiquidityModal({ open, onClose }: Props) {
                 setAssetAddress(event.target.value as Address)
                 setStatusMessage(null)
               }}
-              className="rounded-2xl border border-white/15 bg-[#0d1524] px-4 py-2"
+              className="w-full rounded-2xl border border-white/15 bg-[#0d1524] px-4 py-2"
             >
               {config.assets.map((item) => (
                 <option key={item.address} value={item.address} className="bg-[#0d1524]">
@@ -183,19 +183,19 @@ export function LiquidityModal({ open, onClose }: Props) {
                   : '—'}
               </span>
             </div>
-            <div className="mt-3 flex gap-3">
+            <div className="mt-3 flex flex-col gap-3 sm:flex-row">
               <input
                 type="number"
                 min={0}
                 placeholder="0.0"
                 value={amountInput}
                 onChange={(event) => setAmountInput(event.target.value)}
-                className="flex-1 rounded-2xl border border-white/10 bg-[#101a2b] px-4 py-2 text-lg font-semibold"
+                className="w-full rounded-2xl border border-white/10 bg-[#101a2b] px-4 py-2 text-lg font-semibold sm:flex-1"
               />
               <button
                 type="button"
                 onClick={() => setAmountInput(maxBalance ? String(maxBalance) : '')}
-                className="rounded-2xl border border-white/15 px-3 py-2 text-xs uppercase tracking-[0.2em] text-white/70 hover:border-white/40 hover:text-white"
+                className="w-full rounded-2xl border border-white/15 px-3 py-2 text-xs uppercase tracking-[0.2em] text-white/70 transition hover:border-white/40 hover:text-white sm:w-auto"
               >
                 Max
               </button>
@@ -212,12 +212,12 @@ export function LiquidityModal({ open, onClose }: Props) {
           </div>
         </div>
 
-        <div className="mt-6 flex flex-wrap gap-3">
+        <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:flex-wrap">
           {needsApproval && (
             <button
               onClick={handleApprove}
               disabled={!isConnected || isWriting}
-              className="rounded-2xl bg-white/10 px-5 py-3 text-sm font-semibold text-white transition hover:bg-white/20 disabled:opacity-60"
+              className="w-full rounded-2xl bg-white/10 px-5 py-3 text-sm font-semibold text-white transition hover:bg-white/20 disabled:opacity-60 sm:flex-1"
             >
               {isWriting ? 'Submitting…' : 'Approve token'}
             </button>
@@ -225,7 +225,7 @@ export function LiquidityModal({ open, onClose }: Props) {
           <button
             onClick={handleSupply}
             disabled={!isConnected || !amountValue || isWriting || needsApproval}
-            className="rounded-2xl bg-gradient-to-r from-emerald-400 via-teal-400 to-sky-500 px-5 py-3 text-sm font-semibold text-black transition disabled:opacity-60"
+            className="w-full rounded-2xl bg-gradient-to-r from-emerald-400 via-teal-400 to-sky-500 px-5 py-3 text-sm font-semibold text-black transition disabled:opacity-60 sm:flex-1"
           >
             {isWriting ? 'Supplying…' : 'Supply liquidity'}
           </button>
@@ -234,7 +234,7 @@ export function LiquidityModal({ open, onClose }: Props) {
               setAmountInput('')
               setStatusMessage(null)
             }}
-            className="rounded-2xl border border-white/15 px-5 py-3 text-sm text-white/70 transition hover:border-white/40 hover:text-white"
+            className="w-full rounded-2xl border border-white/15 px-5 py-3 text-sm text-white/70 transition hover:border-white/40 hover:text-white sm:w-auto"
           >
             Reset
           </button>

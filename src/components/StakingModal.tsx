@@ -149,7 +149,7 @@ export function StakingModal({ open, onClose, preview }: Props) {
 
   return (
     <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/70 px-4 backdrop-blur-sm">
-      <div className="w-full max-w-3xl space-y-6 rounded-3xl border border-white/10 bg-[#08111d] p-6 text-white/90 shadow-[0_28px_100px_rgba(6,12,36,0.65)]">
+      <div className="w-full max-w-3xl max-h-[90vh] space-y-6 overflow-y-auto rounded-3xl border border-white/10 bg-[#08111d] p-6 text-white/90 shadow-[0_28px_100px_rgba(6,12,36,0.65)]">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="space-y-3">
             <span className="text-[11px] uppercase tracking-[0.35em] text-emerald-200">Staking</span>
@@ -258,11 +258,11 @@ export function StakingModal({ open, onClose, preview }: Props) {
           </div>
         </div>
 
-        <div className="flex flex-wrap gap-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
           <button
             onClick={handleStake}
             disabled={!canStake}
-            className="rounded-2xl bg-gradient-to-r from-emerald-400 via-teal-400 to-sky-500 px-5 py-3 text-sm font-semibold text-black transition disabled:opacity-60"
+            className="w-full rounded-2xl bg-gradient-to-r from-emerald-400 via-teal-400 to-sky-500 px-5 py-3 text-sm font-semibold text-black transition disabled:opacity-60 sm:flex-1"
           >
             {isSubmitting || isSwitching ? 'Submitting…' : 'Stake with Lido'}
           </button>
@@ -272,7 +272,7 @@ export function StakingModal({ open, onClose, preview }: Props) {
               setReferralInput('')
               setStatusMessage(null)
             }}
-            className="rounded-2xl border border-white/15 px-5 py-3 text-sm text-white/70 transition hover:border-white/40 hover:text-white"
+            className="w-full rounded-2xl border border-white/15 px-5 py-3 text-sm text-white/70 transition hover:border-white/40 hover:text-white sm:w-auto"
           >
             Reset
           </button>
@@ -281,7 +281,7 @@ export function StakingModal({ open, onClose, preview }: Props) {
               href={`https://etherscan.io/tx/${txHash}`}
               target="_blank"
               rel="noreferrer"
-              className="inline-flex items-center gap-2 rounded-2xl border border-sky-400/50 bg-sky-500/10 px-4 py-3 text-sm text-sky-100 transition hover:border-sky-400 hover:text-sky-50"
+              className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-sky-400/50 bg-sky-500/10 px-4 py-3 text-sm text-sky-100 transition hover:border-sky-400 hover:text-sky-50 sm:w-auto"
             >
               View on Etherscan
             </a>

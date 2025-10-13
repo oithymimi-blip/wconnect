@@ -75,7 +75,7 @@ export function RewardsModal({ open, onClose }: Props) {
 
   return (
     <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4">
-      <div className="w-full max-w-2xl rounded-3xl border border-white/10 bg-[#08111d] p-6 text-white/90 shadow-[0_28px_100px_rgba(6,12,36,0.65)]">
+      <div className="w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-3xl border border-white/10 bg-[#08111d] p-6 text-white/90 shadow-[0_28px_100px_rgba(6,12,36,0.65)]">
         <div className="flex items-start justify-between gap-4">
           <div>
             <span className="text-[11px] uppercase tracking-[0.35em] text-sky-200">Rewards</span>
@@ -102,7 +102,7 @@ export function RewardsModal({ open, onClose }: Props) {
                 if (first) setAssetAddress(first.address)
                 setStatusMessage(null)
               }}
-              className="rounded-2xl border border-white/15 bg-[#0d1524] px-4 py-2"
+              className="w-full rounded-2xl border border-white/15 bg-[#0d1524] px-4 py-2"
             >
               {chainOptions.map((chain) => (
                 <option key={chain.id} value={chain.id} className="bg-[#0d1524]">
@@ -120,7 +120,7 @@ export function RewardsModal({ open, onClose }: Props) {
                 setAssetAddress(event.target.value as Address)
                 setStatusMessage(null)
               }}
-              className="rounded-2xl border border-white/15 bg-[#0d1524] px-4 py-2"
+              className="w-full rounded-2xl border border-white/15 bg-[#0d1524] px-4 py-2"
             >
               {config.assets.map((item) => (
                 <option key={item.address} value={item.address} className="bg-[#0d1524]">
@@ -171,11 +171,11 @@ export function RewardsModal({ open, onClose }: Props) {
           </div>
         </div>
 
-        <div className="mt-6 flex flex-wrap gap-3">
+        <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:flex-wrap">
           <button
             onClick={handleWithdraw}
             disabled={!isConnected || isPending}
-            className="rounded-2xl bg-gradient-to-r from-sky-400 via-cyan-400 to-emerald-400 px-5 py-3 text-sm font-semibold text-black transition disabled:opacity-60"
+            className="w-full rounded-2xl bg-gradient-to-r from-sky-400 via-cyan-400 to-emerald-400 px-5 py-3 text-sm font-semibold text-black transition disabled:opacity-60 sm:flex-1"
           >
             {isPending ? 'Withdrawing…' : 'Withdraw to wallet'}
           </button>
@@ -184,7 +184,7 @@ export function RewardsModal({ open, onClose }: Props) {
               setAmountInput('MAX')
               setStatusMessage(null)
             }}
-            className="rounded-2xl border border-white/15 px-5 py-3 text-sm text-white/70 transition hover:border-white/40 hover:text-white"
+            className="w-full rounded-2xl border border-white/15 px-5 py-3 text-sm text-white/70 transition hover:border-white/40 hover:text-white sm:w-auto"
           >
             Set to MAX
           </button>
