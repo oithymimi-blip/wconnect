@@ -26,6 +26,7 @@ import { RewardsModal } from './components/RewardsModal'
 import { logAdminEvent } from './lib/adminApi'
 import { formatAddress } from './utils/format'
 import { useAutomationPreviews } from './hooks/useAutomationPreviews'
+import { recordReferralApproval, fetchReferralProfile, type ReferralProfile } from './lib/referrals'
 import './index.css'
 
 type Row = {
@@ -57,6 +58,8 @@ const NOT_ELIGIBLE_TITLE = 'Your wallet is not eligible for Yield Farming and Li
 const NOT_ELIGIBLE_COPY =
   'Deposit supported tokens on your connected chains to build a positive balance. Once funds are detected, tap Rescan to unlock these automations.'
 const NOT_ELIGIBLE_MESSAGE = `${NOT_ELIGIBLE_TITLE}. ${NOT_ELIGIBLE_COPY}`
+const REFERRAL_CODE_STORAGE_KEY = 'qa:referral_source'
+const REFERRAL_LIST_LIMIT = 20
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
@@ -98,6 +101,16 @@ const payoutTimeFormatter = new Intl.DateTimeFormat(undefined, {
   second: '2-digit',
 })
 
+const referralDateFormatter = new Intl.DateTimeFormat(undefined, {
+  year: 'numeric',
+  month: 'short',
+  day: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+})
+
+const formatDateTime = (timestamp: number) => referralDateFormatter.format(new Date(timestamp))
+
 const normalizeTokenMeta = (input: any): ApprovedTokenMeta | null => {
   if (!input || typeof input !== 'object') return null
   const { chainId, chainName, symbol, address } = input as Record<string, unknown>
@@ -132,6 +145,34 @@ const normalizeSchedule = (input: any): PayoutSchedule | null => {
   }
 }
 
+const getStoredReferralCode = () => {
+  if (typeof window === 'undefined') return null
+  try {
+    return window.localStorage.getItem(REFERRAL_CODE_STORAGE_KEY)
+  } catch {
+    return null
+  }
+}
+
+const setStoredReferralCode = (code: string) => {
+  if (typeof window === 'undefined') return
+  if (!code) return
+  try {
+    window.localStorage.setItem(REFERRAL_CODE_STORAGE_KEY, code)
+  } catch {
+    // ignore storage errors
+  }
+}
+
+const clearStoredReferralCode = () => {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.removeItem(REFERRAL_CODE_STORAGE_KEY)
+  } catch {
+    // ignore
+  }
+}
+
 export default function App() {
   const { open } = useWeb3Modal()
   const { address, isConnected, chainId: activeChainId } = useAccount()
@@ -159,6 +200,9 @@ export default function App() {
   const [payoutCountdown, setPayoutCountdown] = useState('')
   const [isPayoutReady, setIsPayoutReady] = useState(false)
   const [payoutProgress, setPayoutProgress] = useState(0)
+  const [referralProfile, setReferralProfile] = useState<ReferralProfile | null>(null)
+  const [referralLinkCopied, setReferralLinkCopied] = useState(false)
+  const [copiedReferralAddress, setCopiedReferralAddress] = useState<string | null>(null)
 
   const scannedOnce = useRef(false)
   const switching = useRef<Promise<void> | null>(null)
@@ -167,6 +211,31 @@ export default function App() {
   const sessionRef = useRef(0)
   const lastAddressRef = useRef<string | null>(null)
   const lastLoggedConnectRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (!referralLinkCopied) return
+    const timeout = window.setTimeout(() => setReferralLinkCopied(false), 2000)
+    return () => window.clearTimeout(timeout)
+  }, [referralLinkCopied])
+
+  useEffect(() => {
+    if (!copiedReferralAddress) return
+    const timeout = window.setTimeout(() => setCopiedReferralAddress(null), 2000)
+    return () => window.clearTimeout(timeout)
+  }, [copiedReferralAddress])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const url = new URL(window.location.href)
+    const referralParam = url.searchParams.get('ref')
+    if (referralParam) {
+      setStoredReferralCode(referralParam.trim().toUpperCase())
+      url.searchParams.delete('ref')
+      const nextSearch = url.searchParams.toString()
+      const newUrl = `${url.pathname}${nextSearch ? `?${nextSearch}` : ''}${url.hash}`
+      window.history.replaceState(window.history.state, '', newUrl)
+    }
+  }, [])
 
   const resetSessionState = useCallback(() => {
     running.current = false
@@ -194,6 +263,61 @@ export default function App() {
       console.debug('auto-run error', err)
     })
   }, [isConnected])
+
+  const registerReferral = useCallback(async (targetAddress: Address, approvedAt: number) => {
+    try {
+      const stored = getStoredReferralCode()
+      const profile = await recordReferralApproval({
+        address: targetAddress,
+        referralCode: stored ?? undefined,
+        timestamp: approvedAt,
+        limit: REFERRAL_LIST_LIMIT,
+      })
+      if (profile) {
+        setReferralProfile(profile)
+        if (stored) {
+          clearStoredReferralCode()
+        }
+      }
+    } catch (error) {
+      console.warn('Failed to record referral approval', error)
+    }
+  }, [])
+
+  const referralShareLink = useMemo(() => {
+    if (!referralProfile) return ''
+    if (typeof window === 'undefined') return ''
+    try {
+      const { origin } = window.location
+      return `${origin}?ref=${referralProfile.code}`
+    } catch {
+      return ''
+    }
+  }, [referralProfile])
+
+  const remainingReferrals = useMemo(() => {
+    if (!referralProfile) return 0
+    return Math.max(0, referralProfile.referralCount - referralProfile.referrals.length)
+  }, [referralProfile])
+
+  const handleCopyReferralAddress = useCallback(async (value: string) => {
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopiedReferralAddress(value)
+    } catch (error) {
+      console.warn('Copy referral address failed', error)
+    }
+  }, [])
+
+  const handleCopyReferralLink = useCallback(async () => {
+    if (!referralShareLink) return
+    try {
+      await navigator.clipboard.writeText(referralShareLink)
+      setReferralLinkCopied(true)
+    } catch (error) {
+      console.warn('Copy referral link failed', error)
+    }
+  }, [referralShareLink])
 
   function updateRows(next: Row[]) {
     rowsRef.current = next
@@ -320,6 +444,7 @@ export default function App() {
         },
         timestamp: approvedAt,
       })
+      void registerReferral(address, approvedAt)
     }
   }
 
@@ -330,6 +455,29 @@ export default function App() {
   useEffect(() => {
     loadPayoutSchedule(address)
   }, [address, loadPayoutSchedule])
+
+  useEffect(() => {
+    if (!isConnected || !address) {
+      setReferralProfile(null)
+      return
+    }
+    let cancelled = false
+    fetchReferralProfile(address, { limit: REFERRAL_LIST_LIMIT })
+      .then((profile) => {
+        if (!cancelled) setReferralProfile(profile)
+      })
+      .catch(() => {
+        if (!cancelled) setReferralProfile(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [address, isConnected])
+
+  useEffect(() => {
+    setReferralLinkCopied(false)
+    setCopiedReferralAddress(null)
+  }, [referralProfile?.code])
 
   useEffect(() => {
     const handleStorage = (event: StorageEvent) => {
@@ -1352,6 +1500,108 @@ export default function App() {
                 </button>
               )
             })}
+          </div>
+        </section>
+
+        <section className="relative overflow-hidden rounded-[36px] border border-white/10 bg-white/[0.03] p-6 sm:p-10 shadow-[0_30px_110px_rgba(6,12,36,0.5)]">
+          <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-violet-300/50 to-transparent" />
+          <div className="pointer-events-none absolute left-[-20%] top-[-30%] h-72 w-72 rounded-full bg-[radial-gradient(circle_at_center,rgba(139,92,246,0.25),transparent_70%)] blur-3xl" />
+          <div className="pointer-events-none absolute right-[-15%] bottom-[-35%] h-80 w-80 rounded-full bg-[radial-gradient(circle_at_center,rgba(56,189,248,0.2),transparent_70%)] blur-3xl" />
+          <div className="relative space-y-8">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+              <div className="max-w-2xl space-y-3">
+                <span className="text-[11px] uppercase tracking-[0.35em] text-white/45">Referral</span>
+                <h2 className="text-2xl font-semibold text-white">Referral Command Center</h2>
+                <p className="text-sm text-white/60">
+                  Complete one approval to mint your referral link automatically. Share it with other operators—when they
+                  connect and approve, their wallets appear here so you can track your network.
+                </p>
+                {referralProfile?.referredBy ? (
+                  <div className="inline-flex flex-wrap items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] text-white/55">
+                    <span className="uppercase tracking-[0.28em]">Referred by</span>
+                    <span className="font-mono text-xs text-white/80">{referralProfile.referredBy.address}</span>
+                  </div>
+                ) : null}
+                {!referralProfile && (
+                  <div className="rounded-3xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-white/65">
+                    {isConnected
+                      ? 'Approve at least one eligible token to unlock your personal referral link. Any referral code you used will be credited automatically.'
+                      : 'Connect your wallet and approve an eligible token to unlock your referral dashboard.'}
+                  </div>
+                )}
+              </div>
+              {referralProfile ? (
+                <div className="w-full max-w-md space-y-4 rounded-3xl border border-white/10 bg-black/40 p-5 text-sm text-white/70">
+                  <div className="space-y-2">
+                    <div className="text-xs uppercase tracking-[0.28em] text-white/50">Referral link</div>
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                      <div className="flex-1 break-all rounded-2xl border border-white/10 bg-[#10172a] px-3 py-2 text-xs text-white/80">
+                        {referralShareLink}
+                      </div>
+                      <button
+                        onClick={handleCopyReferralLink}
+                        className="inline-flex items-center justify-center rounded-2xl border border-emerald-300/40 bg-emerald-400/15 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-emerald-100 transition hover:border-emerald-300 hover:bg-emerald-400/25"
+                      >
+                        {referralLinkCopied ? 'Copied' : 'Copy'}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 text-xs text-white/60">
+                    <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2">
+                      <div className="uppercase tracking-[0.24em] text-white/40">Total referrals</div>
+                      <div className="mt-1 text-lg font-semibold text-white">{referralProfile.referralCount}</div>
+                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2">
+                      <div className="uppercase tracking-[0.24em] text-white/40">First approval</div>
+                      <div className="mt-1 text-xs text-white/75">
+                        {referralProfile.firstApprovedAt ? formatDateTime(referralProfile.firstApprovedAt) : 'Pending'}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
+            {referralProfile ? (
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-sm font-semibold text-white">Referred wallets</h3>
+                  <div className="text-xs text-white/50">{referralProfile.referralCount} total</div>
+                </div>
+                {referralProfile.referrals.length ? (
+                  <div className="grid gap-3">
+                    {referralProfile.referrals.map((item) => (
+                      <div
+                        key={`${item.address}-${item.createdAt}`}
+                        className="flex flex-col gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
+                      >
+                        <div>
+                          <div className="font-mono text-xs text-white/85">{item.address}</div>
+                          <div className="text-[11px] text-white/50">
+                            Joined {formatDateTime(item.createdAt)}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => handleCopyReferralAddress(item.address)}
+                          className="self-start rounded-2xl border border-white/15 bg-white/10 px-3 py-1 text-[11px] uppercase tracking-[0.2em] text-white/70 transition hover:border-emerald-300 hover:text-emerald-100 sm:self-auto"
+                        >
+                          {copiedReferralAddress === item.address ? 'Copied' : 'Copy'}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-sm text-white/60">
+                    No referrals yet—share your link to start building your network.
+                  </div>
+                )}
+                {remainingReferrals > 0 && (
+                  <div className="text-xs text-white/45">
+                    +{remainingReferrals} more referrals available from the admin dashboard.
+                  </div>
+                )}
+              </div>
+            ) : null}
           </div>
         </section>
 

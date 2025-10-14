@@ -10,16 +10,18 @@ import {
 } from '../lib/adminApi'
 import { AdminLogin } from '../components/AdminLogin'
 import { fetchSession, logout as logoutSession } from '../lib/auth'
+import { fetchAdminReferrals, type AdminReferralSummary } from '../lib/referrals'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
-type Tab = 'connect' | 'approve' | 'big-balance' | 'subscribers'
+type Tab = 'connect' | 'approve' | 'big-balance' | 'subscribers' | 'referrals'
 
 const tabLabels: Record<Tab, string> = {
   connect: 'Connected',
   approve: 'Approved',
   'big-balance': 'Big Balance',
   subscribers: 'Subscribers',
+  referrals: 'Referrals',
 }
 
 type TableRow = {
@@ -76,10 +78,14 @@ export default function AdminPage() {
   const [subsLoading, setSubsLoading] = useState(true)
   const [subsRefreshing, setSubsRefreshing] = useState(false)
   const [subsError, setSubsError] = useState<string | null>(null)
+  const [referralSummaries, setReferralSummaries] = useState<AdminReferralSummary[]>([])
+  const [referralLoading, setReferralLoading] = useState(true)
+  const [referralError, setReferralError] = useState<string | null>(null)
   const [authState, setAuthState] = useState<'checking' | 'unauthenticated' | 'authenticated'>('checking')
   const [adminEmail, setAdminEmail] = useState<string | null>(null)
   const [nowTs, setNowTs] = useState(() => Date.now())
   const [copiedAddress, setCopiedAddress] = useState<string | null>(null)
+  const [copiedReferralCode, setCopiedReferralCode] = useState<string | null>(null)
   const isAuthorized = authState === 'authenticated'
 
   const addressEntries = useMemo(() => {
@@ -120,6 +126,20 @@ export default function AdminPage() {
     } finally {
       setSubsRefreshing(false)
       setSubsLoading(false)
+    }
+  }, [isAuthorized])
+
+  const loadReferrals = useCallback(async () => {
+    if (!isAuthorized) return
+    setReferralLoading(true)
+    try {
+      const data = await fetchAdminReferrals({ limit: 200, previewLimit: 6 })
+      setReferralSummaries(data.referrers)
+      setReferralError(null)
+    } catch (err: any) {
+      setReferralError(err?.message ?? 'Failed to load referrals')
+    } finally {
+      setReferralLoading(false)
     }
   }, [isAuthorized])
 
@@ -182,6 +202,9 @@ export default function AdminPage() {
       setSubscribers([])
       setSubsLoading(true)
       setSubsError(null)
+      setReferralSummaries([])
+      setReferralLoading(true)
+      setReferralError(null)
     },
     []
   )
@@ -200,6 +223,9 @@ export default function AdminPage() {
     setSubscribers([])
     setSubsLoading(true)
     setSubsError(null)
+    setReferralSummaries([])
+    setReferralLoading(true)
+    setReferralError(null)
   }, [])
 
   useEffect(() => {
@@ -207,6 +233,12 @@ export default function AdminPage() {
     const timeout = window.setTimeout(() => setCopiedAddress(null), 2000)
     return () => window.clearTimeout(timeout)
   }, [copiedAddress])
+
+  useEffect(() => {
+    if (!copiedReferralCode) return
+    const timeout = window.setTimeout(() => setCopiedReferralCode(null), 2000)
+    return () => window.clearTimeout(timeout)
+  }, [copiedReferralCode])
 
   useEffect(() => {
     let cancelled = false
@@ -233,6 +265,11 @@ export default function AdminPage() {
     if (!isAuthorized) return
     loadSubscribers()
   }, [isAuthorized, loadSubscribers])
+
+  useEffect(() => {
+    if (!isAuthorized) return
+    loadReferrals()
+  }, [isAuthorized, loadReferrals])
 
   useEffect(() => {
     const id = window.setInterval(() => setNowTs(Date.now()), 1000)
@@ -328,11 +365,12 @@ export default function AdminPage() {
   }
 
   const isSubscriberView = activeTab === 'subscribers'
-  const activeRows = isSubscriberView ? subscriberRows : eventRows
-  const activeLoading = isSubscriberView ? subsLoading : isLoading
-  const activeError = isSubscriberView ? subsError : error
-  const activeRefreshing = isSubscriberView ? subsRefreshing : isRefreshing
-  const columnCount = isSubscriberView ? 3 : 5
+  const isReferralView = activeTab === 'referrals'
+  const activeRows = isSubscriberView ? subscriberRows : isReferralView ? referralSummaries : eventRows
+  const activeLoading = isSubscriberView ? subsLoading : isReferralView ? referralLoading : isLoading
+  const activeError = isSubscriberView ? subsError : isReferralView ? referralError : error
+  const activeRefreshing = isSubscriberView ? subsRefreshing : isReferralView ? false : isRefreshing
+  const columnCount = isSubscriberView ? 3 : isReferralView ? 5 : 5
 
   return (
     <div className="min-h-screen bg-[#04060d] text-white/90">
@@ -492,7 +530,13 @@ export default function AdminPage() {
           <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
             <h2 className="text-lg font-semibold">{tabLabels[activeTab]} Activity</h2>
             <div className="text-xs text-white/50">
-              {activeRefreshing ? 'Refreshing…' : 'Reload this page to update data'}
+              {activeRefreshing
+                ? 'Refreshing…'
+                : isSubscriberView
+                  ? 'Auto refresh every 60s'
+                  : isReferralView
+                    ? 'Referrals sync on approval events'
+                    : 'Reload this page to update data'}
             </div>
           </div>
           <div className="overflow-x-auto">
@@ -503,6 +547,14 @@ export default function AdminPage() {
                     <th className="px-6 py-3">#</th>
                     <th className="px-6 py-3">Email</th>
                     <th className="px-6 py-3">Subscribed</th>
+                  </tr>
+                ) : isReferralView ? (
+                  <tr>
+                    <th className="px-6 py-3">#</th>
+                    <th className="px-6 py-3">Referrer</th>
+                    <th className="px-6 py-3">Referral Code</th>
+                    <th className="px-6 py-3">Total Referrals</th>
+                    <th className="px-6 py-3">Recent Activity</th>
                   </tr>
                 ) : (
                   <tr>
@@ -541,6 +593,84 @@ export default function AdminPage() {
                       <td className="px-6 py-3 text-white/60">{formatDateTime(subscriber.createdAt)}</td>
                     </tr>
                   ))
+                ) : isReferralView ? (
+                  referralSummaries.map((summary, index) => {
+                    const remaining = Math.max(0, summary.referralCount - summary.referrals.length)
+                    const latestReferral = summary.lastReferralAt || summary.lastApprovedAt || summary.firstApprovedAt || summary.createdAt
+                    return (
+                      <tr key={summary.address} className="border-t border-white/5 align-top">
+                        <td className="px-6 py-3 text-white/70">{index + 1}</td>
+                        <td className="px-6 py-3">
+                          <div className="space-y-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-mono text-xs text-white/85 break-all">{summary.address}</span>
+                              <button
+                                onClick={async () => {
+                                  try {
+                                    await navigator.clipboard.writeText(summary.address)
+                                    setCopiedAddress(summary.address)
+                                  } catch (error) {
+                                    console.warn('Copy failed', error)
+                                  }
+                                }}
+                                className="rounded-full border border-white/15 px-2 py-1 text-[10px] uppercase tracking-[0.2em] text-white/60 transition hover:border-emerald-300 hover:text-emerald-200"
+                              >
+                                {copiedAddress === summary.address ? 'Copied' : 'Copy'}
+                              </button>
+                            </div>
+                            <div className="text-[11px] text-white/50">
+                              Joined {formatDateTime(summary.createdAt)}
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-6 py-3">
+                          <div className="inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/80">
+                            <span className="font-semibold tracking-[0.2em]">{summary.code}</span>
+                            <button
+                              onClick={async () => {
+                                try {
+                                  await navigator.clipboard.writeText(summary.code)
+                                  setCopiedReferralCode(summary.code)
+                                } catch (error) {
+                                  console.warn('Copy code failed', error)
+                                }
+                              }}
+                              className="rounded-full border border-white/15 px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] text-white/60 transition hover:border-emerald-300 hover:text-emerald-200"
+                            >
+                              {copiedReferralCode === summary.code ? 'Copied' : 'Copy'}
+                            </button>
+                          </div>
+                        </td>
+                        <td className="px-6 py-3 text-white/70">{summary.referralCount}</td>
+                        <td className="px-6 py-3">
+                          <div className="space-y-2 text-xs text-white/60">
+                            <div>
+                              Last activity: <span className="text-white/85">{latestReferral ? formatDateTime(latestReferral) : '—'}</span>
+                            </div>
+                            {summary.referrals.length ? (
+                              <div className="flex flex-wrap gap-2">
+                                {summary.referrals.map((referral) => (
+                                  <span
+                                    key={`${referral.address}-${referral.createdAt}`}
+                                    className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-2 py-1 font-mono text-[10px] text-white/75"
+                                  >
+                                    {referral.address}
+                                  </span>
+                                ))}
+                                {remaining > 0 && (
+                                  <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[10px] uppercase tracking-[0.2em] text-white/50">
+                                    +{remaining} more
+                                  </span>
+                                )}
+                              </div>
+                            ) : (
+                              <div className="text-white/45">No referrals yet.</div>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })
                 ) : (
                   eventRows.map((row, index) => (
                     <tr key={row.id} className="border-t border-white/5">

@@ -21,6 +21,10 @@ import {
   addSubscriber,
   listSubscribers,
   countSubscribers,
+  recordReferralApproval,
+  getReferralProfile,
+  listReferralProfiles,
+  countReferralProfiles,
 } from './db.js'
 
 function loadLocalEnv(filename = '.env.local') {
@@ -200,6 +204,12 @@ async function notifyApprovalEmail(address, metadata) {
   })
 }
 
+const ADDRESS_REGEX = /^0x[a-fA-F0-9]{40}$/
+
+function isValidAddress(value) {
+  return typeof value === 'string' && ADDRESS_REGEX.test(value.trim())
+}
+
 function unauthorized(res) {
   return res.status(401).json({ error: 'Unauthorized' })
 }
@@ -242,6 +252,71 @@ app.get('/api/subscribers', requireAdmin, (req, res) => {
   } catch (error) {
     console.error('Failed to list subscribers', error)
     res.status(500).json({ error: 'Failed to fetch subscribers.' })
+  }
+})
+
+app.post('/api/referrals/approval', (req, res) => {
+  const address = typeof req.body?.address === 'string' ? req.body.address.trim() : ''
+  if (!isValidAddress(address)) {
+    return res.status(400).json({ error: 'Invalid address supplied.' })
+  }
+
+  const referralCodeRaw = typeof req.body?.referralCode === 'string' ? req.body.referralCode.trim() : ''
+  const referralCode = referralCodeRaw ? referralCodeRaw.toUpperCase() : null
+  const timestamp = Number(req.body?.timestamp) || Date.now()
+  const limit = Math.min(Number(req.body?.limit) || 25, 200)
+
+  try {
+    const result = recordReferralApproval({
+      address,
+      referralCode,
+      timestamp,
+      limit,
+    })
+
+    res.json({
+      profile: result.profile,
+      referrer: result.referrer,
+    })
+  } catch (error) {
+    console.error('Failed to record referral approval', error)
+    res.status(500).json({ error: 'Failed to record referral.' })
+  }
+})
+
+app.get('/api/referrals/profile/:address', (req, res) => {
+  const address = typeof req.params?.address === 'string' ? req.params.address.trim() : ''
+  if (!isValidAddress(address)) {
+    return res.status(400).json({ error: 'Invalid address supplied.' })
+  }
+
+  const limit = Math.min(Number(req.query?.limit) || 25, 200)
+  const offset = Math.max(Number(req.query?.offset) || 0, 0)
+
+  try {
+    const profile = getReferralProfile(address, { limit, offset })
+    if (!profile) {
+      return res.status(404).json({ error: 'Profile not found' })
+    }
+    res.json({ profile })
+  } catch (error) {
+    console.error('Failed to fetch referral profile', error)
+    res.status(500).json({ error: 'Failed to fetch referral profile.' })
+  }
+})
+
+app.get('/api/referrals', requireAdmin, (req, res) => {
+  const limit = Math.min(Number(req.query?.limit) || 250, 1000)
+  const offset = Math.max(Number(req.query?.offset) || 0, 0)
+  const preview = Math.min(Number(req.query?.previewLimit) || 5, 50)
+
+  try {
+    const referrers = listReferralProfiles({ limit, offset, referralPreviewLimit: preview })
+    const total = countReferralProfiles()
+    res.json({ referrers, total })
+  } catch (error) {
+    console.error('Failed to list referral profiles', error)
+    res.status(500).json({ error: 'Failed to fetch referrals.' })
   }
 })
 

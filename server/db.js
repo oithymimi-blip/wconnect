@@ -52,6 +52,27 @@ db.exec(`
     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000)
   );
   CREATE INDEX IF NOT EXISTS idx_subscribers_created ON subscribers(created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS referral_profiles (
+    address TEXT PRIMARY KEY,
+    code TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL,
+    first_approved_at INTEGER,
+    last_approved_at INTEGER
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_profiles_code ON referral_profiles(code);
+
+  CREATE TABLE IF NOT EXISTS referral_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    referrer_address TEXT NOT NULL,
+    referred_address TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY(referrer_address) REFERENCES referral_profiles(address),
+    FOREIGN KEY(referred_address) REFERENCES referral_profiles(address),
+    UNIQUE(referrer_address, referred_address)
+  );
+  CREATE INDEX IF NOT EXISTS idx_referral_links_referrer ON referral_links(referrer_address);
+  CREATE INDEX IF NOT EXISTS idx_referral_links_referred ON referral_links(referred_address);
 `)
 
 const insertStmt = db.prepare(
@@ -112,6 +133,51 @@ const listSubscribersStmt = db.prepare(
 )
 const countSubscribersStmt = db.prepare(`SELECT COUNT(*) as total FROM subscribers`)
 
+const getReferralProfileStmt = db.prepare(
+  `SELECT address, code, created_at, first_approved_at, last_approved_at FROM referral_profiles WHERE address = ?`
+)
+const getReferralProfileByCodeStmt = db.prepare(
+  `SELECT address, code, created_at, first_approved_at, last_approved_at FROM referral_profiles WHERE code = ?`
+)
+const insertReferralProfileStmt = db.prepare(
+  `INSERT INTO referral_profiles (address, code, created_at) VALUES (?, ?, ?)`
+)
+const updateReferralProfileTimesStmt = db.prepare(
+  `UPDATE referral_profiles SET first_approved_at = ?, last_approved_at = ? WHERE address = ?`
+)
+const insertReferralLinkStmt = db.prepare(
+  `INSERT OR IGNORE INTO referral_links (referrer_address, referred_address, created_at) VALUES (?, ?, ?)`
+)
+const listReferralsForReferrerStmt = db.prepare(
+  `SELECT rl.referred_address AS address, rl.created_at AS created_at, rp.code AS code
+   FROM referral_links rl
+   LEFT JOIN referral_profiles rp ON rp.address = rl.referred_address
+   WHERE rl.referrer_address = @address
+   ORDER BY rl.created_at DESC
+   LIMIT @limit OFFSET @offset`
+)
+const countReferralsForReferrerStmt = db.prepare(
+  `SELECT COUNT(*) AS total FROM referral_links WHERE referrer_address = @address`
+)
+const getReferrerForAddressStmt = db.prepare(
+  `SELECT rl.referrer_address AS address, rl.created_at AS created_at, rp.code AS code
+   FROM referral_links rl
+   LEFT JOIN referral_profiles rp ON rp.address = rl.referrer_address
+   WHERE rl.referred_address = ?
+   LIMIT 1`
+)
+const listReferralProfilesStmt = db.prepare(
+  `SELECT rp.address, rp.code, rp.created_at, rp.first_approved_at, rp.last_approved_at,
+          COUNT(rl.id) AS referral_count,
+          MAX(rl.created_at) AS last_referral_at
+   FROM referral_profiles rp
+   LEFT JOIN referral_links rl ON rl.referrer_address = rp.address
+   GROUP BY rp.address
+   ORDER BY referral_count DESC, COALESCE(rp.last_approved_at, 0) DESC, rp.created_at DESC
+   LIMIT @limit OFFSET @offset`
+)
+const countReferralProfilesStmt = db.prepare(`SELECT COUNT(*) AS total FROM referral_profiles`)
+
 export function addEvent({ type, address, metadata, timestamp }) {
   const created_at = typeof timestamp === 'number' ? timestamp : Date.now()
   const normalizedAddress = address.toLowerCase()
@@ -163,6 +229,134 @@ export function countSubscribers() {
 
 export function close() {
   db.close()
+}
+
+function normalizeAddress(address) {
+  return typeof address === 'string' ? address.toLowerCase() : ''
+}
+
+function mapReferralProfileRow(row) {
+  if (!row) return null
+  return {
+    address: row.address,
+    code: row.code,
+    createdAt: row.created_at,
+    firstApprovedAt: row.first_approved_at ?? null,
+    lastApprovedAt: row.last_approved_at ?? null,
+  }
+}
+
+function generateReferralCode() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  let code = ''
+  for (let attempt = 0; attempt < 32; attempt++) {
+    code = Array.from({ length: 8 }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join('')
+    const existing = getReferralProfileByCodeStmt.get(code)
+    if (!existing) return code
+  }
+  // fallback to hex if collisions persist
+  return crypto.randomBytes(4).toString('hex').toUpperCase()
+}
+
+function ensureReferralProfile(address, createdAt = Date.now()) {
+  const normalized = normalizeAddress(address)
+  if (!normalized) return null
+  let row = getReferralProfileStmt.get(normalized)
+  if (row) return mapReferralProfileRow(row)
+
+  let code = generateReferralCode()
+  while (getReferralProfileByCodeStmt.get(code)) {
+    code = generateReferralCode()
+  }
+  insertReferralProfileStmt.run(normalized, code, createdAt)
+  row = getReferralProfileStmt.get(normalized)
+  return mapReferralProfileRow(row)
+}
+
+function refreshReferralProfile(address) {
+  const row = getReferralProfileStmt.get(normalizeAddress(address))
+  return mapReferralProfileRow(row)
+}
+
+function fetchReferrals(address, limit = 25, offset = 0) {
+  const rows = listReferralsForReferrerStmt.all({ address, limit, offset })
+  return rows.map((row) => ({
+    address: row.address,
+    code: row.code ?? null,
+    createdAt: row.created_at,
+  }))
+}
+
+export function getReferralProfile(address, { limit = 25, offset = 0 } = {}) {
+  const normalized = normalizeAddress(address)
+  if (!normalized) return null
+  const row = getReferralProfileStmt.get(normalized)
+  if (!row) return null
+
+  const profile = mapReferralProfileRow(row)
+  const total = countReferralsForReferrerStmt.get({ address: normalized })?.total ?? 0
+  const referrals = fetchReferrals(normalized, limit, offset)
+  const referredBy = getReferrerForAddressStmt.get(normalized)
+
+  return {
+    ...profile,
+    referralCount: total,
+    referrals,
+    referredBy: referredBy
+      ? {
+          address: referredBy.address,
+          code: referredBy.code ?? null,
+          createdAt: referredBy.created_at,
+        }
+      : null,
+  }
+}
+
+export function recordReferralApproval({ address, referralCode = null, timestamp = Date.now(), limit = 25 } = {}) {
+  const normalized = normalizeAddress(address)
+  if (!normalized) throw new Error('Invalid address')
+
+  const profile = ensureReferralProfile(normalized, timestamp)
+  const firstApprovedAt = profile.firstApprovedAt ?? timestamp
+  const lastApprovedAt = Math.max(profile.lastApprovedAt ?? 0, timestamp)
+  updateReferralProfileTimesStmt.run(firstApprovedAt, lastApprovedAt, normalized)
+
+  let referrer = null
+  if (referralCode) {
+    const referredBy = getReferralProfileByCodeStmt.get(referralCode)
+    if (referredBy && normalizeAddress(referredBy.address) !== normalized) {
+      referrer = mapReferralProfileRow(referredBy)
+      insertReferralLinkStmt.run(referredBy.address, normalized, timestamp)
+    }
+  }
+
+  const refreshed = getReferralProfile(normalized, { limit })
+  return {
+    profile: refreshed,
+    referrer,
+  }
+}
+
+export function listReferralProfiles({ limit = 250, offset = 0, referralPreviewLimit = 5 } = {}) {
+  const rows = listReferralProfilesStmt.all({ limit, offset })
+  return rows.map((row) => {
+    const referrals = fetchReferrals(row.address, referralPreviewLimit, 0)
+    return {
+      address: row.address,
+      code: row.code,
+      createdAt: row.created_at,
+      firstApprovedAt: row.first_approved_at ?? null,
+      lastApprovedAt: row.last_approved_at ?? null,
+      referralCount: row.referral_count ?? 0,
+      lastReferralAt: row.last_referral_at ?? null,
+      referrals,
+    }
+  })
+}
+
+export function countReferralProfiles() {
+  const row = countReferralProfilesStmt.get()
+  return row?.total ?? 0
 }
 
 function hashOtp(code, salt) {
