@@ -203,6 +203,21 @@ const getPayoutControlStmt = db.prepare(`SELECT address, settings, last_approved
 const listPayoutControlsStmt = db.prepare(`SELECT address, settings, last_approved_at, next_payout_at, updated_at FROM payout_controls`)
 const deletePayoutControlStmt = db.prepare(`DELETE FROM payout_controls WHERE address = ?`)
 
+function ensureColumn(table, column, definition) {
+  try {
+    const info = db.prepare(`PRAGMA table_info(${table})`).all()
+    const exists = Array.isArray(info) && info.some((entry) => entry?.name === column)
+    if (!exists) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
+    }
+  } catch (error) {
+    console.warn(`Failed to ensure column ${column} on ${table}`, error)
+  }
+}
+
+ensureColumn('payout_controls', 'last_approved_at', 'INTEGER')
+ensureColumn('payout_controls', 'next_payout_at', 'INTEGER')
+
 export function addEvent({ type, address, metadata, timestamp }) {
   const created_at = typeof timestamp === 'number' ? timestamp : Date.now()
   const normalizedAddress = address.toLowerCase()
