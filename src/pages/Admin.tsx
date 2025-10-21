@@ -20,6 +20,8 @@ type PayoutControl = {
   pauseRemainingMs?: number
   adjustedNextPayoutAt?: number
   adjustedLastApprovedAt?: number
+  cycleStartAt?: number
+  cycleMs?: number
 }
 
 type UpcomingPayoutRow = {
@@ -34,6 +36,8 @@ type UpcomingPayoutRow = {
   progress: number
   totalUsd?: number
   control?: PayoutControl
+  isCycle: boolean
+  cycleMs?: number
 }
 
 type Tab = 'connect' | 'approve' | 'big-balance' | 'subscribers' | 'referrals'
@@ -383,24 +387,30 @@ export default function AdminPage() {
     return Array.from(map.values())
   }, [events])
 
-  const sanitizePayoutControl = (control: PayoutControl | undefined, payout: UpcomingPayoutRow): PayoutControl | undefined => {
+  const sanitizePayoutControl = (control: PayoutControl | undefined): PayoutControl | undefined => {
     if (!control) return undefined
     const normalized: PayoutControl = { ...control }
     if (!normalized.paused) {
       delete normalized.paused
       delete normalized.pauseRemainingMs
     }
-    if (normalized.adjustedLastApprovedAt !== undefined && Math.abs(normalized.adjustedLastApprovedAt - payout.baseLastApprovedAt) < 1) {
-      delete normalized.adjustedLastApprovedAt
+    if (normalized.cycleMs !== undefined && normalized.cycleMs <= 0) {
+      delete normalized.cycleMs
     }
-    if (!normalized.paused && normalized.adjustedNextPayoutAt !== undefined && Math.abs(normalized.adjustedNextPayoutAt - payout.baseNextPayoutAt) < 1000) {
+    const hasManualAdjust =
+      normalized.adjustedLastApprovedAt !== undefined || normalized.adjustedNextPayoutAt !== undefined
+    const hasCycle = typeof normalized.cycleStartAt === 'number'
+    const hasPause = Boolean(normalized.paused)
+    if (!hasManualAdjust) {
+      delete normalized.adjustedLastApprovedAt
       delete normalized.adjustedNextPayoutAt
     }
-    if (!normalized.paused && normalized.adjustedNextPayoutAt === undefined && normalized.adjustedLastApprovedAt === undefined) {
-      return undefined
+    if (!hasCycle) {
+      delete normalized.cycleStartAt
+      delete normalized.cycleMs
     }
-    if (normalized.paused && normalized.pauseRemainingMs === undefined) {
-      normalized.pauseRemainingMs = Math.max(payout.remaining, 0)
+    if (!hasManualAdjust && !hasCycle && !hasPause) {
+      return undefined
     }
     return normalized
   }
@@ -416,7 +426,7 @@ export default function AdminPage() {
           const { [key]: _omit, ...rest } = previous
           return rest
         }
-        const cleaned = sanitizePayoutControl(nextRaw, payout)
+        const cleaned = sanitizePayoutControl(nextRaw)
         if (!cleaned) {
           if (current === undefined) return previous
           const { [key]: _omit, ...rest } = previous
@@ -434,31 +444,75 @@ export default function AdminPage() {
       .map((summary) => {
         const lower = summary.address.toLowerCase()
         const control = payoutControls[lower]
-        const adjustedLast = control?.adjustedLastApprovedAt ?? summary.lastApprovedAt
-        const scheduledNext = control?.adjustedNextPayoutAt ?? summary.nextPayoutAt
-        const baseRemaining = Math.max(scheduledNext - nowTs, 0)
-        let remaining = baseRemaining
-        let status: 'paused' | 'ready' | 'running' = 'running'
+        const totalUsd = snapshots[lower]?.totalUsd
+        const baseLast = summary.lastApprovedAt
+        const baseNext = summary.nextPayoutAt
 
-        if (control?.paused) {
-          remaining = Math.max(control.pauseRemainingMs ?? baseRemaining, 0)
-          status = 'paused'
-        } else if (remaining <= 0) {
-          remaining = 0
-          status = 'ready'
+        let lastApprovedAt = baseLast
+        let scheduledNext = baseNext
+        let remaining = Math.max(scheduledNext - nowTs, 0)
+        let status: 'paused' | 'ready' | 'running' = remaining <= 0 ? 'ready' : 'running'
+        let resumeAt = status === 'ready' ? nowTs : scheduledNext
+        let isCycle = false
+        let cycleMs = control?.cycleMs && control.cycleMs > 0 ? control.cycleMs : DAY_MS
+
+        if (control) {
+          const hasCycle = typeof control.cycleStartAt === 'number'
+          if (control.paused) {
+            remaining = Math.max(control.pauseRemainingMs ?? remaining, 0)
+            status = 'paused'
+            resumeAt = nowTs + remaining
+            if (hasCycle) {
+              isCycle = true
+              scheduledNext = resumeAt
+              lastApprovedAt = scheduledNext - cycleMs
+            } else {
+              lastApprovedAt = control.adjustedLastApprovedAt ?? baseLast
+              scheduledNext = resumeAt
+            }
+          } else if (hasCycle) {
+            isCycle = true
+            const cycleStart = control.cycleStartAt ?? baseNext
+            const safeCycleMs = cycleMs > 0 ? cycleMs : DAY_MS
+            let effectiveStart = Number.isFinite(cycleStart) ? cycleStart : baseNext
+
+            if (nowTs < effectiveStart) {
+              scheduledNext = effectiveStart
+              lastApprovedAt = Math.max(baseLast, scheduledNext - safeCycleMs)
+            } else {
+              const elapsed = nowTs - effectiveStart
+              const cyclesElapsed = Math.floor(elapsed / safeCycleMs)
+              lastApprovedAt = Math.max(baseLast, effectiveStart + cyclesElapsed * safeCycleMs)
+              scheduledNext = lastApprovedAt + safeCycleMs
+              if (scheduledNext <= nowTs) {
+                const nextCycle = cyclesElapsed + 1
+                lastApprovedAt = Math.max(baseLast, effectiveStart + nextCycle * safeCycleMs)
+                scheduledNext = lastApprovedAt + safeCycleMs
+              }
+            }
+
+            remaining = Math.max(scheduledNext - nowTs, 0)
+            status = 'running'
+            resumeAt = scheduledNext
+            cycleMs = safeCycleMs
+          } else {
+            lastApprovedAt = control.adjustedLastApprovedAt ?? baseLast
+            scheduledNext = control.adjustedNextPayoutAt ?? baseNext
+            remaining = Math.max(scheduledNext - nowTs, 0)
+            status = remaining <= 0 ? 'ready' : 'running'
+            resumeAt = status === 'ready' ? nowTs : scheduledNext
+          }
         }
 
-        const totalDuration = Math.max(scheduledNext - adjustedLast, DAY_MS)
+        const totalDuration = Math.max(scheduledNext - lastApprovedAt, DAY_MS)
         const elapsed = Math.max(totalDuration - remaining, 0)
         const progress = totalDuration > 0 ? Math.min(1, Math.max(0, elapsed / totalDuration)) : 1
-        const resumeAt = status === 'paused' ? nowTs + remaining : scheduledNext
-        const totalUsd = snapshots[lower]?.totalUsd
 
         return {
           address: summary.address,
-          baseLastApprovedAt: summary.lastApprovedAt,
-          baseNextPayoutAt: summary.nextPayoutAt,
-          lastApprovedAt: adjustedLast,
+          baseLastApprovedAt: baseLast,
+          baseNextPayoutAt: baseNext,
+          lastApprovedAt,
           scheduledNextPayoutAt: scheduledNext,
           resumeAt,
           remaining,
@@ -466,6 +520,8 @@ export default function AdminPage() {
           progress,
           totalUsd,
           control,
+          isCycle,
+          cycleMs: isCycle ? cycleMs : undefined,
         }
       })
       .sort((a, b) => a.resumeAt - b.resumeAt)
@@ -479,15 +535,28 @@ export default function AdminPage() {
     (payout: UpcomingPayoutRow) => {
       if (payout.status === 'paused') return
       const remaining = Math.max(payout.remaining, 0)
-      const now = Date.now()
       setControlForPayout(payout, (current) => {
+        const hasCycle = payout.isCycle || typeof current?.cycleStartAt === 'number'
+        if (hasCycle) {
+          const cycleLength =
+            current?.cycleMs && current.cycleMs > 0 ? current.cycleMs : payout.cycleMs ?? DAY_MS
+          const cycleStart =
+            current?.cycleStartAt ??
+            Math.max(payout.scheduledNextPayoutAt - cycleLength, payout.baseLastApprovedAt)
+          return {
+            cycleStartAt: cycleStart,
+            cycleMs: cycleLength,
+            paused: true,
+            pauseRemainingMs: remaining,
+          }
+        }
         const adjustedLast = current?.adjustedLastApprovedAt ?? payout.lastApprovedAt
-        const target = current?.adjustedNextPayoutAt ?? now + remaining
+        const target = current?.adjustedNextPayoutAt ?? payout.scheduledNextPayoutAt
         return {
-          paused: true,
-          pauseRemainingMs: remaining,
           adjustedLastApprovedAt: adjustedLast,
           adjustedNextPayoutAt: target,
+          paused: true,
+          pauseRemainingMs: remaining,
         }
       })
     },
@@ -497,8 +566,18 @@ export default function AdminPage() {
   const handleResumePayout = useCallback(
     (payout: UpcomingPayoutRow) => {
       setControlForPayout(payout, (current) => {
-        const adjustedLast = current?.adjustedLastApprovedAt ?? payout.lastApprovedAt
+        const hasCycle = payout.isCycle || typeof current?.cycleStartAt === 'number'
         const remaining = Math.max(current?.pauseRemainingMs ?? payout.remaining, 0)
+        if (hasCycle) {
+          const cycleLength =
+            current?.cycleMs && current.cycleMs > 0 ? current.cycleMs : payout.cycleMs ?? DAY_MS
+          const cycleStart = Math.max(Date.now() + remaining - cycleLength, payout.baseLastApprovedAt)
+          return {
+            cycleStartAt: cycleStart,
+            cycleMs: cycleLength,
+          }
+        }
+        const adjustedLast = current?.adjustedLastApprovedAt ?? payout.lastApprovedAt
         const target = Math.max(Date.now() + remaining, adjustedLast + 1000)
         return {
           adjustedLastApprovedAt: adjustedLast,
@@ -513,16 +592,38 @@ export default function AdminPage() {
     (payout: UpcomingPayoutRow, deltaMs: number) => {
       if (!deltaMs) return
       setControlForPayout(payout, (current) => {
+        const hasCycle = payout.isCycle || typeof current?.cycleStartAt === 'number'
+        if (hasCycle) {
+          const cycleLength =
+            current?.cycleMs && current.cycleMs > 0 ? current.cycleMs : payout.cycleMs ?? DAY_MS
+          if (current?.paused) {
+            const remaining = Math.max(current.pauseRemainingMs ?? payout.remaining, 0)
+            const updatedRemaining = Math.max(remaining + deltaMs, 0)
+            return {
+              cycleStartAt: current?.cycleStartAt,
+              cycleMs: cycleLength,
+              paused: true,
+              pauseRemainingMs: updatedRemaining,
+            }
+          }
+          const baseStart =
+            current?.cycleStartAt ??
+            Math.max(payout.scheduledNextPayoutAt - cycleLength, payout.baseLastApprovedAt)
+          return {
+            cycleStartAt: baseStart + deltaMs,
+            cycleMs: cycleLength,
+          }
+        }
         const adjustedLast = current?.adjustedLastApprovedAt ?? payout.lastApprovedAt
         if (current?.paused) {
           const remaining = Math.max(current.pauseRemainingMs ?? payout.remaining, 0)
           const updatedRemaining = Math.max(remaining + deltaMs, 0)
           const target = Math.max(Date.now() + updatedRemaining, adjustedLast + 1000)
           return {
-            paused: true,
-            pauseRemainingMs: updatedRemaining,
             adjustedLastApprovedAt: adjustedLast,
             adjustedNextPayoutAt: target,
+            paused: true,
+            pauseRemainingMs: updatedRemaining,
           }
         }
         const baseTarget = current?.adjustedNextPayoutAt ?? payout.scheduledNextPayoutAt
@@ -552,16 +653,35 @@ export default function AdminPage() {
       }
       const targetMs = parsed.getTime()
       setControlForPayout(payout, (current) => {
+        const hasCycle = payout.isCycle || typeof current?.cycleStartAt === 'number'
+        if (hasCycle) {
+          const cycleLength =
+            current?.cycleMs && current.cycleMs > 0 ? current.cycleMs : payout.cycleMs ?? DAY_MS
+          const finalTarget = Math.max(targetMs, Date.now())
+          if (current?.paused) {
+            const remaining = Math.max(finalTarget - Date.now(), 0)
+            return {
+              cycleStartAt: current?.cycleStartAt,
+              cycleMs: cycleLength,
+              paused: true,
+              pauseRemainingMs: remaining,
+            }
+          }
+          return {
+            cycleStartAt: finalTarget - cycleLength,
+            cycleMs: cycleLength,
+          }
+        }
         const adjustedLast = current?.adjustedLastApprovedAt ?? payout.lastApprovedAt
         const minTarget = adjustedLast + 1000
         const finalTarget = Math.max(targetMs, minTarget)
         if (current?.paused) {
           const remaining = Math.max(finalTarget - Date.now(), 0)
           return {
-            paused: true,
-            pauseRemainingMs: remaining,
             adjustedLastApprovedAt: adjustedLast,
             adjustedNextPayoutAt: finalTarget,
+            paused: true,
+            pauseRemainingMs: remaining,
           }
         }
         return {
@@ -569,6 +689,17 @@ export default function AdminPage() {
           adjustedNextPayoutAt: finalTarget,
         }
       })
+    },
+    [setControlForPayout]
+  )
+
+  const handleStartPayout = useCallback(
+    (payout: UpcomingPayoutRow) => {
+      const cycleStart = Math.max(payout.baseNextPayoutAt, Date.now())
+      setControlForPayout(payout, () => ({
+        cycleStartAt: cycleStart,
+        cycleMs: DAY_MS,
+      }))
     },
     [setControlForPayout]
   )
@@ -685,6 +816,7 @@ export default function AdminPage() {
                     {upcomingPayouts.map((payout) => {
                       const isPaused = payout.status === 'paused'
                       const isReady = payout.status === 'ready'
+                      const canStart = !isPaused && !payout.isCycle && isReady
                       const statusLabel = isPaused ? 'Paused' : isReady ? 'Ready to settle' : 'In progress'
                       const nextScheduledDisplay = formatDateTime(payout.scheduledNextPayoutAt)
                       const resumeDisplay = formatDateTime(payout.resumeAt)
@@ -800,6 +932,15 @@ export default function AdminPage() {
                               </Link>
                             </div>
                             <div className="mt-3 flex flex-wrap gap-2 border-t border-white/10 pt-3">
+                              {canStart && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleStartPayout(payout)}
+                                  className="rounded-full border border-emerald-300/60 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-emerald-200 transition hover:bg-emerald-400/10"
+                                >
+                                  Start
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 onClick={() => (isPaused ? handleResumePayout(payout) : handlePausePayout(payout))}
