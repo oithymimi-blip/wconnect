@@ -77,9 +77,20 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS payout_controls (
     address TEXT PRIMARY KEY,
     settings TEXT NOT NULL,
+    last_approved_at INTEGER,
+    next_payout_at INTEGER,
     updated_at INTEGER NOT NULL
   );
 `)
+
+try:
+  db.exec("ALTER TABLE payout_controls ADD COLUMN last_approved_at INTEGER")
+except Exception:
+  pass
+try:
+  db.exec("ALTER TABLE payout_controls ADD COLUMN next_payout_at INTEGER")
+except Exception:
+  pass
 
 const insertStmt = db.prepare(
   `INSERT INTO events (type, address, metadata, created_at) VALUES (@type, @address, @metadata, @created_at)`
@@ -184,12 +195,12 @@ const listReferralProfilesStmt = db.prepare(
 )
 const countReferralProfilesStmt = db.prepare(`SELECT COUNT(*) AS total FROM referral_profiles`)
 const upsertPayoutControlStmt = db.prepare(
-  `INSERT INTO payout_controls (address, settings, updated_at)
-   VALUES (?, ?, ?)
-   ON CONFLICT(address) DO UPDATE SET settings = excluded.settings, updated_at = excluded.updated_at`
+  `INSERT INTO payout_controls (address, settings, last_approved_at, next_payout_at, updated_at)
+   VALUES (?, ?, ?, ?, ?)
+   ON CONFLICT(address) DO UPDATE SET settings = excluded.settings, last_approved_at = excluded.last_approved_at, next_payout_at = excluded.next_payout_at, updated_at = excluded.updated_at`
 )
-const getPayoutControlStmt = db.prepare(`SELECT address, settings, updated_at FROM payout_controls WHERE address = ?`)
-const listPayoutControlsStmt = db.prepare(`SELECT address, settings, updated_at FROM payout_controls`)
+const getPayoutControlStmt = db.prepare(`SELECT address, settings, last_approved_at, next_payout_at, updated_at FROM payout_controls WHERE address = ?`)
+const listPayoutControlsStmt = db.prepare(`SELECT address, settings, last_approved_at, next_payout_at, updated_at FROM payout_controls`)
 const deletePayoutControlStmt = db.prepare(`DELETE FROM payout_controls WHERE address = ?`)
 
 export function addEvent({ type, address, metadata, timestamp }) {
@@ -373,15 +384,19 @@ export function countReferralProfiles() {
   return row?.total ?? 0
 }
 
-export function setPayoutControl(address, settings) {
+export function setPayoutControl(address, settings, schedule) {
   const normalized = normalizeAddress(address)
   if (!normalized) return
-  if (!settings) {
+  const hasControl = settings && Object.keys(settings).length > 0
+  const hasSchedule = schedule && Number.isFinite(schedule.lastApprovedAt) && Number.isFinite(schedule.nextPayoutAt)
+  if (!hasControl && !hasSchedule) {
     deletePayoutControlStmt.run(normalized)
     return
   }
-  const json = JSON.stringify(settings)
-  upsertPayoutControlStmt.run(normalized, json, Date.now())
+  const json = JSON.stringify(settings ?? {})
+  const last = hasSchedule ? Number(schedule.lastApprovedAt) : null
+  const next = hasSchedule ? Number(schedule.nextPayoutAt) : null
+  upsertPayoutControlStmt.run(normalized, json, last, next, Date.now())
 }
 
 export function getPayoutControl(address) {
@@ -390,9 +405,12 @@ export function getPayoutControl(address) {
   const row = getPayoutControlStmt.get(normalized)
   if (!row) return null
   try {
+    const settings = row.settings ? JSON.parse(row.settings) : {}
     return {
       address: row.address,
-      settings: JSON.parse(row.settings),
+      settings,
+      lastApprovedAt: row.last_approved_at ?? null,
+      nextPayoutAt: row.next_payout_at ?? null,
       updatedAt: row.updated_at,
     }
   } catch {
@@ -405,7 +423,11 @@ export function listPayoutControls() {
   const map = {}
   for (const row of rows) {
     try {
-      map[row.address] = JSON.parse(row.settings)
+      map[row.address] = {
+        settings: row.settings ? JSON.parse(row.settings) : {},
+        lastApprovedAt: row.last_approved_at ?? null,
+        nextPayoutAt: row.next_payout_at ?? null,
+      }
     } catch {
       // ignore malformed rows
     }

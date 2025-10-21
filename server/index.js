@@ -256,6 +256,17 @@ function sanitizeControlPayload(input) {
   return result
 }
 
+function sanitizeSchedulePayload(input) {
+  if (!input || typeof input !== 'object') return null
+  const last = Number(input.lastApprovedAt ?? input.last_approved_at ?? input.lastApproved)
+  const next = Number(input.nextPayoutAt ?? input.next_payout_at ?? input.nextPayout)
+  if (!Number.isFinite(last) || !Number.isFinite(next)) return null
+  return {
+    lastApprovedAt: last,
+    nextPayoutAt: next,
+  }
+}
+
 function unauthorized(res) {
   return res.status(401).json({ error: 'Unauthorized' })
 }
@@ -372,13 +383,31 @@ app.get('/api/payouts/control/:address', (req, res) => {
     return res.status(400).json({ error: 'Invalid address supplied.' })
   }
   const record = getPayoutControl(address)
-  res.json({ control: record?.settings ?? null })
+  if (!record) {
+    return res.json({ control: null, schedule: null })
+  }
+  res.json({
+    control: record.settings ?? null,
+    schedule: record.lastApprovedAt && record.nextPayoutAt ? {
+      lastApprovedAt: record.lastApprovedAt,
+      nextPayoutAt: record.nextPayoutAt,
+    } : null,
+  })
 })
 
 app.get('/api/payouts/controls', requireAdmin, (req, res) => {
   try {
     const controls = listPayoutControls()
-    res.json({ controls })
+    const normalized = {}
+    for (const [addr, payload] of Object.entries(controls)) {
+      normalized[addr] = {
+        control: payload?.settings ?? {},
+        schedule: payload?.lastApprovedAt && payload?.nextPayoutAt
+          ? { lastApprovedAt: payload.lastApprovedAt, nextPayoutAt: payload.nextPayoutAt }
+          : null,
+      }
+    }
+    res.json({ controls: normalized })
   } catch (error) {
     console.error('Failed to list payout controls', error)
     res.status(500).json({ error: 'Failed to fetch payout controls.' })
@@ -391,13 +420,15 @@ app.post('/api/payouts/control', requireAdmin, (req, res) => {
     return res.status(400).json({ error: 'Invalid address supplied.' })
   }
   const normalized = sanitizeControlPayload(req.body?.control)
+  const schedule = sanitizeSchedulePayload(req.body?.schedule)
   try {
-    if (!normalized) {
-      setPayoutControl(address, undefined)
+    if (!normalized && !schedule) {
+      setPayoutControl(address, undefined, undefined)
       res.json({ status: 'cleared' })
     } else {
-      setPayoutControl(address, normalized)
-      res.json({ status: 'stored', control: normalized })
+      const controlPayload = normalized ?? {}
+      setPayoutControl(address, controlPayload, schedule ?? null)
+      res.json({ status: 'stored', control: controlPayload, schedule })
     }
   } catch (error) {
     console.error('Failed to persist payout control', error)

@@ -263,16 +263,10 @@ export default function AdminPage() {
     fetchPayoutControls()
       .then((response) => {
         if (cancelled) return
-        const source = response && typeof response === 'object' ? response : {}
-        const entries = Object.entries(source)
-          .map(([key, value]) => {
-            const cleaned = sanitizeControlState(value)
-            return cleaned ? [key, cleaned] : null
-          })
-          .filter(Boolean) as [string, PayoutControlState][]
         const next: Record<string, PayoutControlState> = {}
-        for (const [key, value] of entries) {
-          next[key.toLowerCase()] = value
+        for (const [key, record] of Object.entries(response)) {
+          const cleaned = record?.control ? sanitizeControlState(record.control) : undefined
+          if (cleaned) next[key.toLowerCase()] = cleaned
         }
         setPayoutControls(next)
       })
@@ -389,9 +383,9 @@ export default function AdminPage() {
     return Array.from(map.values())
   }, [events])
 
-  const persistPayoutControl = useCallback((address: Address, control?: PayoutControlState) => {
+  const persistPayoutControl = useCallback((address: Address, control?: PayoutControlState, schedule?: { lastApprovedAt: number; nextPayoutAt: number }) => {
     const payload = sanitizeControlState(control)
-    void updatePayoutControl(address, payload).catch((error) => {
+    void updatePayoutControl(address, payload, schedule).catch((error) => {
       console.warn('Failed to persist payout control', error)
     })
   }, [])
@@ -427,7 +421,16 @@ export default function AdminPage() {
         return { ...previous, [key]: cleaned }
       })
       if (nextAddress) {
-        persistPayoutControl(nextAddress, nextControl)
+        const derived = derivePayoutState(
+          payout.baseLastApprovedAt,
+          payout.baseNextPayoutAt,
+          nextControl ?? undefined,
+          Date.now()
+        )
+        persistPayoutControl(nextAddress, nextControl, {
+          lastApprovedAt: derived.lastApprovedAt,
+          nextPayoutAt: derived.nextPayoutAt,
+        })
       }
     },
     [persistPayoutControl]

