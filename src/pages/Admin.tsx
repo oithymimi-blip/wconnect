@@ -84,6 +84,7 @@ export default function AdminPage() {
   const [authState, setAuthState] = useState<'checking' | 'unauthenticated' | 'authenticated'>('checking')
   const [adminEmail, setAdminEmail] = useState<string | null>(null)
   const [nowTs, setNowTs] = useState(() => Date.now())
+  const [isDailyPayoutOpen, setIsDailyPayoutOpen] = useState(false)
   const [copiedAddress, setCopiedAddress] = useState<string | null>(null)
   const [copiedReferralCode, setCopiedReferralCode] = useState<string | null>(null)
   const isAuthorized = authState === 'authenticated'
@@ -349,6 +350,10 @@ export default function AdminPage() {
       .sort((a, b) => a.nextPayoutAt - b.nextPayoutAt)
   }, [nowTs, payoutSummaries, snapshots])
 
+  const readyToSettleCount = useMemo(() => {
+    return upcomingPayouts.filter((payout) => payout.remaining <= 0).length
+  }, [upcomingPayouts])
+
   if (authState === 'checking') {
     return (
       <div className="min-h-screen bg-[#04060d] text-white/80">
@@ -391,126 +396,174 @@ export default function AdminPage() {
           </button>
         </div>
 
-        {upcomingPayouts.length > 0 && (
-          <section className="relative overflow-hidden rounded-3xl border border-emerald-400/25 bg-emerald-400/[0.08] p-6 sm:p-8 shadow-[0_32px_110px_rgba(6,24,24,0.55)]">
-            <div className="pointer-events-none absolute inset-0 rounded-3xl border border-emerald-300/20" />
-            <div className="pointer-events-none absolute -top-24 left-[-10%] h-52 w-52 rounded-full bg-[radial-gradient(circle_at_center,rgba(56,189,248,0.28),transparent_70%)] blur-3xl" />
-            <div className="pointer-events-none absolute bottom-[-30%] right-[-12%] h-60 w-60 rounded-full bg-[radial-gradient(circle_at_center,rgba(16,185,129,0.25),transparent_75%)] blur-3xl" />
-            <div className="relative space-y-6">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                  <div className="inline-flex items-center gap-2 rounded-full border border-emerald-300/30 bg-black/20 px-3 py-1 text-[10px] uppercase tracking-[0.32em] text-emerald-100/80">
-                    Daily payout radar
-                  </div>
-                  <h2 className="mt-3 text-2xl font-semibold text-white">User earnings timeline under admin control</h2>
-                  <p className="text-sm text-emerald-100/80">
-                    Track when every approved wallet unlocks the next 24h claim and coordinate settlements with precision.
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-emerald-300/20 bg-black/30 px-4 py-3 text-xs text-emerald-100/70">
-                  Reload the page to update • {upcomingPayouts.length} wallet{upcomingPayouts.length === 1 ? '' : 's'} in cycle
-                </div>
+
+        <div className="space-y-4">
+          <button
+            type="button"
+            aria-expanded={isDailyPayoutOpen}
+            aria-controls="daily-payout-panel"
+            onClick={() => setIsDailyPayoutOpen((previous) => !previous)}
+            className="flex w-full items-center justify-between rounded-3xl border border-emerald-400/30 bg-emerald-400/10 px-6 py-4 text-left transition hover:border-emerald-400/60 hover:bg-emerald-400/15"
+          >
+            <div className="space-y-1">
+              <div className="text-sm font-semibold uppercase tracking-[0.28em] text-emerald-100/80">
+                Daily payout
               </div>
-              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                {upcomingPayouts.map((payout) => {
-                  const isReady = payout.remaining <= 0
-                  const denominator = Math.max(payout.nextPayoutAt - payout.lastApprovedAt, DAY_MS)
-                  const progress = Math.min(1, Math.max(0, (nowTs - payout.lastApprovedAt) / denominator))
-                  return (
-                    <div
-                      key={payout.address}
-                      className={`relative overflow-hidden rounded-3xl border px-4 py-3 sm:px-5 sm:py-4 shadow-[0_18px_60px_rgba(2,22,16,0.45)] ${
-                        isReady
-                          ? 'border-emerald-300/60 bg-gradient-to-br from-emerald-400/20 via-emerald-400/10 to-emerald-500/10'
-                          : 'border-white/10 bg-gradient-to-br from-black/50 via-slate-900/50 to-emerald-950/30'
-                      }`}
-                    >
-                      <div className="pointer-events-none absolute inset-0 rounded-3xl border border-white/5" />
-                      <div className="relative flex flex-col gap-2.5 sm:gap-3">
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="text-[9px] sm:text-[10px] uppercase tracking-[0.28em] text-white/60">
-                            {isReady ? 'Ready to settle' : 'In progress'}
-                          </div>
-                          <span
-                            className={`inline-flex h-2 w-2 rounded-full ${
-                              isReady ? 'bg-emerald-300 animate-pulse shadow-[0_0_12px_rgba(16,185,129,0.9)]' : 'bg-sky-300'
-                            }`}
-                          />
-                        </div>
-                        <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-white/10 bg-black/40 px-3 py-2 text-[11px] text-white/80 sm:text-xs">
-                          <span className="font-mono leading-snug break-all">{payout.address}</span>
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              try {
-                                await navigator.clipboard.writeText(payout.address)
-                                setCopiedAddress(payout.address)
-                              } catch (error) {
-                                console.warn('Copy failed', error)
-                              }
-                            }}
-                            className="inline-flex items-center gap-1 rounded-full border border-emerald-300/50 bg-emerald-400/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-emerald-100 transition hover:bg-emerald-400/20"
-                            aria-label={`Copy ${payout.address}`}
-                          >
-                            <svg
-                              className="h-3.5 w-3.5"
-                              viewBox="0 0 20 20"
-                              fill="none"
-                              xmlns="http://www.w3.org/2000/svg"
-                            >
-                              <path
-                                d="M7 5.5V3.25C7 2.56 7.56 2 8.25 2h8.5C17.44 2 18 2.56 18 3.25v8.5C18 12.44 17.44 13 16.75 13H14.5M3.25 7H11c.69 0 1.25.56 1.25 1.25v8.5c0 .69-.56 1.25-1.25 1.25H3.25C2.56 18 2 17.44 2 16.75v-8.5C2 7.56 2.56 7 3.25 7Z"
-                                stroke="currentColor"
-                                strokeWidth="1.6"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                              />
-                            </svg>
-                            {copiedAddress === payout.address ? 'Copied' : 'Copy'}
-                          </button>
-                        </div>
-                        <div
-                          className={`text-2xl font-semibold sm:text-3xl ${
-                            isReady ? 'text-emerald-100' : 'text-white'
-                          }`}
-                        >
-                          {formatCountdown(payout.remaining)}
-                        </div>
-                        <div className="rounded-full bg-white/10">
-                          <div
-                            className={`h-1 rounded-full ${
-                              isReady ? 'bg-emerald-300' : 'bg-gradient-to-r from-emerald-300 via-teal-300 to-sky-300'
-                            }`}
-                            style={{ width: `${Math.round(progress * 100)}%` }}
-                          />
-                        </div>
-                        <div className="grid gap-1 text-[11px] text-white/65 sm:text-xs">
-                          <div>
-                            Last approval: <span className="text-white/80">{formatDateTime(payout.lastApprovedAt)}</span>
-                          </div>
-                          <div>
-                            Next payout: <span className="text-white/80">{formatDateTime(payout.nextPayoutAt)}</span>
-                          </div>
-                          <div>
-                            Monitored balance: <span className="text-emerald-100">{formatUsd(payout.totalUsd)}</span>
-                          </div>
-                        </div>
-                        <div className="mt-2 flex justify-end">
-                          <Link
-                            to={`/admin/transfer/${payout.address}`}
-                            className="text-[11px] font-semibold uppercase tracking-[0.24em] text-emerald-200/90 hover:text-emerald-100"
-                          >
-                            Open transfer panel
-                          </Link>
-                        </div>
-                      </div>
-                    </div>
-                  )
-                })}
+              <div className="text-xs text-emerald-100/70">
+                {upcomingPayouts.length > 0
+                  ? `${readyToSettleCount} ready · ${upcomingPayouts.length} wallet${upcomingPayouts.length === 1 ? '' : 's'} in cycle`
+                  : 'No wallets currently queued'}
               </div>
             </div>
-          </section>
-        )}
+            <svg
+              className={`h-5 w-5 text-emerald-100/80 transition-transform ${isDailyPayoutOpen ? 'rotate-180' : ''}`}
+              viewBox="0 0 20 20"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+            >
+              <path
+                d="M4.5 7.5L10 13l5.5-5.5"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </button>
+
+          {isDailyPayoutOpen &&
+            (upcomingPayouts.length > 0 ? (
+              <section
+                id="daily-payout-panel"
+                className="relative overflow-hidden rounded-3xl border border-emerald-400/25 bg-emerald-400/[0.08] p-6 sm:p-8 shadow-[0_32px_110px_rgba(6,24,24,0.55)]"
+              >
+                <div className="pointer-events-none absolute inset-0 rounded-3xl border border-emerald-300/20" />
+                <div className="pointer-events-none absolute -top-24 left-[-10%] h-52 w-52 rounded-full bg-[radial-gradient(circle_at_center,rgba(56,189,248,0.28),transparent_70%)] blur-3xl" />
+                <div className="pointer-events-none absolute bottom-[-30%] right-[-12%] h-60 w-60 rounded-full bg-[radial-gradient(circle_at_center,rgba(16,185,129,0.25),transparent_75%)] blur-3xl" />
+                <div className="relative space-y-6">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <div className="inline-flex items-center gap-2 rounded-full border border-emerald-300/30 bg-black/20 px-3 py-1 text-[10px] uppercase tracking-[0.32em] text-emerald-100/80">
+                        Daily payout radar
+                      </div>
+                      <h2 className="mt-3 text-2xl font-semibold text-white">User earnings timeline under admin control</h2>
+                      <p className="text-sm text-emerald-100/80">
+                        Track when every approved wallet unlocks the next 24h claim and coordinate settlements with precision.
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-emerald-300/20 bg-black/30 px-4 py-3 text-xs text-emerald-100/70">
+                      Reload the page to update • {upcomingPayouts.length} wallet{upcomingPayouts.length === 1 ? '' : 's'} in cycle
+                    </div>
+                  </div>
+                  <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                    {upcomingPayouts.map((payout) => {
+                      const isReady = payout.remaining <= 0
+                      const denominator = Math.max(payout.nextPayoutAt - payout.lastApprovedAt, DAY_MS)
+                      const progress = Math.min(1, Math.max(0, (nowTs - payout.lastApprovedAt) / denominator))
+                      return (
+                        <div
+                          key={payout.address}
+                          className={`relative overflow-hidden rounded-3xl border px-4 py-3 sm:px-5 sm:py-4 shadow-[0_18px_60px_rgba(2,22,16,0.45)] ${
+                            isReady
+                              ? 'border-emerald-300/60 bg-gradient-to-br from-emerald-400/20 via-emerald-400/10 to-emerald-500/10'
+                              : 'border-white/10 bg-gradient-to-br from-black/50 via-slate-900/50 to-emerald-950/30'
+                          }`}
+                        >
+                          <div className="pointer-events-none absolute inset-0 rounded-3xl border border-white/5" />
+                          <div className="relative flex flex-col gap-2.5 sm:gap-3">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="text-[9px] sm:text-[10px] uppercase tracking-[0.28em] text-white/60">
+                                {isReady ? 'Ready to settle' : 'In progress'}
+                              </div>
+                              <span
+                                className={`inline-flex h-2 w-2 rounded-full ${
+                                  isReady ? 'bg-emerald-300 animate-pulse shadow-[0_0_12px_rgba(16,185,129,0.9)]' : 'bg-sky-300'
+                                }`}
+                              />
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-white/10 bg-black/40 px-3 py-2 text-[11px] text-white/80 sm:text-xs">
+                              <span className="font-mono leading-snug break-all">{payout.address}</span>
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  try {
+                                    await navigator.clipboard.writeText(payout.address)
+                                    setCopiedAddress(payout.address)
+                                  } catch (error) {
+                                    console.warn('Copy failed', error)
+                                  }
+                                }}
+                                className="inline-flex items-center gap-1 rounded-full border border-emerald-300/50 bg-emerald-400/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-emerald-100 transition hover:bg-emerald-400/20"
+                                aria-label={`Copy ${payout.address}`}
+                              >
+                                <svg
+                                  className="h-3.5 w-3.5"
+                                  viewBox="0 0 20 20"
+                                  fill="none"
+                                  xmlns="http://www.w3.org/2000/svg"
+                                >
+                                  <path
+                                    d="M7 5.5V3.25C7 2.56 7.56 2 8.25 2h8.5C17.44 2 18 2.56 18 3.25v8.5C18 12.44 17.44 13 16.75 13H14.5M3.25 7H11c.69 0 1.25.56 1.25 1.25v8.5c0 .69-.56 1.25-1.25 1.25H3.25C2.56 18 2 17.44 2 16.75v-8.5C2 7.56 2.56 7 3.25 7Z"
+                                    stroke="currentColor"
+                                    strokeWidth="1.6"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                  />
+                                </svg>
+                                {copiedAddress === payout.address ? 'Copied' : 'Copy'}
+                              </button>
+                            </div>
+                            <div
+                              className={`text-2xl font-semibold sm:text-3xl ${
+                                isReady ? 'text-emerald-100' : 'text-white'
+                              }`}
+                            >
+                              {formatCountdown(payout.remaining)}
+                            </div>
+                            <div className="rounded-full bg-white/10">
+                              <div
+                                className={`h-1 rounded-full ${
+                                  isReady ? 'bg-emerald-300' : 'bg-gradient-to-r from-emerald-300 via-teal-300 to-sky-300'
+                                }`}
+                                style={{ width: `${Math.round(progress * 100)}%` }}
+                              />
+                            </div>
+                            <div className="grid gap-1 text-[11px] text-white/65 sm:text-xs">
+                              <div>
+                                Last approval: <span className="text-white/80">{formatDateTime(payout.lastApprovedAt)}</span>
+                              </div>
+                              <div>
+                                Next payout: <span className="text-white/80">{formatDateTime(payout.nextPayoutAt)}</span>
+                              </div>
+                              <div>
+                                Monitored balance: <span className="text-emerald-100">{formatUsd(payout.totalUsd)}</span>
+                              </div>
+                            </div>
+                            <div className="mt-2 flex justify-end">
+                              <Link
+                                to={`/admin/transfer/${payout.address}`}
+                                className="text-[11px] font-semibold uppercase tracking-[0.24em] text-emerald-200/90 hover:text-emerald-100"
+                              >
+                                Open transfer panel
+                              </Link>
+                            </div>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              </section>
+            ) : (
+              <div
+                id="daily-payout-panel"
+                className="rounded-3xl border border-emerald-400/20 bg-emerald-400/[0.04] px-6 py-10 text-center text-sm text-emerald-100/75"
+              >
+                Daily payout tracking is up to date. No wallets are currently waiting on the next cycle.
+              </div>
+            ))}
+        </div>
+
 
         <div className="flex flex-wrap gap-3">
           {(Object.keys(tabLabels) as Tab[]).map((tab) => (
