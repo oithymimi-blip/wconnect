@@ -14,6 +14,7 @@ import { buildPermitTypedData, splitSig, supportsPermit2612 } from './lib/permit
 import { PUBLIC, CHAIN_NAME, CHAINS_DEF } from './lib/clients'
 import { TOKENS } from './config/tokens'
 import { ROUTERS } from './config/routers'
+import { fetchPayoutControl } from './lib/payouts'
 import { TokenCard, type Status } from './components/TokenCard'
 import { CryptoPlanetScene } from './components/CryptoPlanetScene'
 import { DeFiLogo } from './components/DeFiLogo'
@@ -25,6 +26,7 @@ import { LiquidityModal } from './components/LiquidityModal'
 import { RewardsModal } from './components/RewardsModal'
 import { logAdminEvent } from './lib/adminApi'
 import { formatAddress } from './utils/format'
+import { derivePayoutState, sanitizeControlState, type PayoutControlState } from './utils/payoutControls'
 import { useAutomationPreviews } from './hooks/useAutomationPreviews'
 import { recordReferralApproval, fetchReferralProfile, type ReferralProfile } from './lib/referrals'
 import './index.css'
@@ -196,6 +198,9 @@ export default function App() {
   const [showStakingModal, setShowStakingModal] = useState(false)
   const [showLiquidityModal, setShowLiquidityModal] = useState(false)
   const [showRewardsModal, setShowRewardsModal] = useState(false)
+  const [basePayoutSchedule, setBasePayoutSchedule] = useState<PayoutSchedule | null>(null)
+  const [remotePayoutControl, setRemotePayoutControl] = useState<PayoutControlState | null>(null)
+  const [payoutOverrideState, setPayoutOverrideState] = useState<{ status: 'paused' | 'ready' | 'running'; remaining: number; resumeAt: number; progress: number; isCycle: boolean; cycleMs?: number } | null>(null)
   const [payoutSchedule, setPayoutSchedule] = useState<PayoutSchedule | null>(null)
   const [payoutCountdown, setPayoutCountdown] = useState('')
   const [isPayoutReady, setIsPayoutReady] = useState(false)
@@ -217,6 +222,33 @@ export default function App() {
     const timeout = window.setTimeout(() => setReferralLinkCopied(false), 2000)
     return () => window.clearTimeout(timeout)
   }, [referralLinkCopied])
+
+  useEffect(() => {
+    if (!basePayoutSchedule) {
+      setPayoutSchedule(null)
+      setPayoutOverrideState(null)
+      return
+    }
+    const derived = derivePayoutState(
+      basePayoutSchedule.lastApprovedAt,
+      basePayoutSchedule.nextPayoutAt,
+      remotePayoutControl ?? undefined,
+      Date.now()
+    )
+    setPayoutSchedule({
+      ...basePayoutSchedule,
+      lastApprovedAt: derived.lastApprovedAt,
+      nextPayoutAt: derived.nextPayoutAt,
+    })
+    setPayoutOverrideState({
+      status: derived.status,
+      remaining: derived.remaining,
+      resumeAt: derived.resumeAt,
+      progress: derived.progress,
+      isCycle: derived.isCycle,
+      cycleMs: derived.cycleMs,
+    })
+  }, [basePayoutSchedule, remotePayoutControl])
 
   useEffect(() => {
     if (!copiedReferralAddress) return
@@ -369,6 +401,7 @@ export default function App() {
 
   const loadPayoutSchedule = useCallback((targetAddress?: Address | null) => {
     if (!targetAddress) {
+      setBasePayoutSchedule(null)
       setPayoutSchedule(null)
       setPayoutCountdown('')
       setIsPayoutReady(false)
@@ -377,8 +410,9 @@ export default function App() {
     const store = getPayoutStore()
     const entry = normalizeSchedule(store[targetAddress.toLowerCase()])
     if (entry) {
-      setPayoutSchedule({ ...entry, tokens: entry.tokens ?? [] })
+      setBasePayoutSchedule({ ...entry, tokens: entry.tokens ?? [] })
     } else {
+      setBasePayoutSchedule(null)
       setPayoutSchedule(null)
       setPayoutCountdown('')
       setIsPayoutReady(false)
@@ -412,7 +446,7 @@ export default function App() {
     }
     store[lower] = nextSchedule
     persistPayoutStore(store)
-    setPayoutSchedule(nextSchedule)
+    setBasePayoutSchedule(nextSchedule)
   }
 
   function markApproved(row: Row) {
@@ -497,13 +531,42 @@ export default function App() {
       setPayoutProgress(0)
       return
     }
+    if (payoutOverrideState?.status === 'paused') {
+      const remaining = Math.max(payoutOverrideState.remaining, 0)
+      setIsPayoutReady(remaining <= 0)
+      setPayoutCountdown(formatPayoutCountdown(remaining))
+      setPayoutProgress(payoutOverrideState.progress)
+      return
+    }
     const update = () => {
       const now = Date.now()
       const ms = payoutSchedule.nextPayoutAt - now
+      if (payoutOverrideState?.isCycle && ms <= 0 && basePayoutSchedule) {
+        const derived = derivePayoutState(
+          basePayoutSchedule.lastApprovedAt,
+          basePayoutSchedule.nextPayoutAt,
+          remotePayoutControl ?? undefined,
+          now
+        )
+        setPayoutSchedule({
+          ...basePayoutSchedule,
+          lastApprovedAt: derived.lastApprovedAt,
+          nextPayoutAt: derived.nextPayoutAt,
+        })
+        setPayoutOverrideState({
+          status: derived.status,
+          remaining: derived.remaining,
+          resumeAt: derived.resumeAt,
+          progress: derived.progress,
+          isCycle: derived.isCycle,
+          cycleMs: derived.cycleMs,
+        })
+        return
+      }
       setIsPayoutReady(ms <= 0)
       setPayoutCountdown(formatPayoutCountdown(ms))
-      const elapsed = now - payoutSchedule.lastApprovedAt
-      const progress = Math.min(1, Math.max(0, elapsed / PAYOUT_INTERVAL_MS))
+      const duration = Math.max(payoutSchedule.nextPayoutAt - payoutSchedule.lastApprovedAt, 1)
+      const progress = Math.min(1, Math.max(0, (duration - Math.max(ms, 0)) / duration))
       setPayoutProgress(progress)
     }
     update()
@@ -511,7 +574,7 @@ export default function App() {
     return () => {
       window.clearInterval(id)
     }
-  }, [payoutSchedule])
+  }, [payoutSchedule, payoutOverrideState, basePayoutSchedule, remotePayoutControl])
 
   useEffect(() => {
     if (isConnected && address) {
@@ -989,6 +1052,30 @@ export default function App() {
       scanAll()
     }
   }, [isConnected, address])
+
+  useEffect(() => {
+    if (!address) {
+      setRemotePayoutControl(null)
+      return
+    }
+    let cancelled = false
+    const load = async () => {
+      try {
+        const control = await fetchPayoutControl(address)
+        if (cancelled) return
+        setRemotePayoutControl(control ? sanitizeControlState(control) ?? null : null)
+      } catch (error) {
+        if (!cancelled) console.warn('Failed to fetch payout control', error)
+      }
+    }
+    load()
+    const interval = window.setInterval(load, 15000)
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
+  }, [address])
+
 
   useEffect(() => {
     if (isConnected && scannedOnce.current && rows.length) {

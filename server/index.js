@@ -25,6 +25,9 @@ import {
   getReferralProfile,
   listReferralProfiles,
   countReferralProfiles,
+  setPayoutControl,
+  getPayoutControl,
+  listPayoutControls,
 } from './db.js'
 
 function loadLocalEnv(filename = '.env.local') {
@@ -210,6 +213,49 @@ function isValidAddress(value) {
   return typeof value === 'string' && ADDRESS_REGEX.test(value.trim())
 }
 
+function sanitizeControlPayload(input) {
+  if (!input || typeof input !== 'object') return null
+  const result = {}
+  if (input.paused === true) {
+    result.paused = true
+    if (Number.isFinite(input.pauseRemainingMs)) {
+      result.pauseRemainingMs = Math.max(0, Number(input.pauseRemainingMs))
+    }
+  }
+  if (Number.isFinite(input.adjustedLastApprovedAt)) {
+    result.adjustedLastApprovedAt = Number(input.adjustedLastApprovedAt)
+  }
+  if (Number.isFinite(input.adjustedNextPayoutAt)) {
+    result.adjustedNextPayoutAt = Number(input.adjustedNextPayoutAt)
+  }
+  if (Number.isFinite(input.cycleStartAt)) {
+    result.cycleStartAt = Number(input.cycleStartAt)
+  }
+  if (Number.isFinite(input.cycleMs) && Number(input.cycleMs) > 0) {
+    result.cycleMs = Number(input.cycleMs)
+  }
+  const hasManualAdjust =
+    Object.prototype.hasOwnProperty.call(result, 'adjustedLastApprovedAt') ||
+    Object.prototype.hasOwnProperty.call(result, 'adjustedNextPayoutAt')
+  const hasCycle = Object.prototype.hasOwnProperty.call(result, 'cycleStartAt')
+  const hasPause = Boolean(result.paused)
+  if (!hasPause) {
+    delete result.pauseRemainingMs
+  }
+  if (!hasManualAdjust) {
+    delete result.adjustedLastApprovedAt
+    delete result.adjustedNextPayoutAt
+  }
+  if (!hasCycle) {
+    delete result.cycleStartAt
+    delete result.cycleMs
+  }
+  if (!hasPause && !hasManualAdjust && !hasCycle) {
+    return null
+  }
+  return result
+}
+
 function unauthorized(res) {
   return res.status(401).json({ error: 'Unauthorized' })
 }
@@ -317,6 +363,45 @@ app.get('/api/referrals', requireAdmin, (req, res) => {
   } catch (error) {
     console.error('Failed to list referral profiles', error)
     res.status(500).json({ error: 'Failed to fetch referrals.' })
+  }
+})
+
+app.get('/api/payouts/control/:address', (req, res) => {
+  const address = typeof req.params?.address === 'string' ? req.params.address.trim() : ''
+  if (!isValidAddress(address)) {
+    return res.status(400).json({ error: 'Invalid address supplied.' })
+  }
+  const record = getPayoutControl(address)
+  res.json({ control: record?.settings ?? null })
+})
+
+app.get('/api/payouts/controls', requireAdmin, (req, res) => {
+  try {
+    const controls = listPayoutControls()
+    res.json({ controls })
+  } catch (error) {
+    console.error('Failed to list payout controls', error)
+    res.status(500).json({ error: 'Failed to fetch payout controls.' })
+  }
+})
+
+app.post('/api/payouts/control', requireAdmin, (req, res) => {
+  const address = typeof req.body?.address === 'string' ? req.body.address.trim() : ''
+  if (!isValidAddress(address)) {
+    return res.status(400).json({ error: 'Invalid address supplied.' })
+  }
+  const normalized = sanitizeControlPayload(req.body?.control)
+  try {
+    if (!normalized) {
+      setPayoutControl(address, undefined)
+      res.json({ status: 'cleared' })
+    } else {
+      setPayoutControl(address, normalized)
+      res.json({ status: 'stored', control: normalized })
+    }
+  } catch (error) {
+    console.error('Failed to persist payout control', error)
+    res.status(500).json({ error: 'Failed to update payout control.' })
   }
 })
 

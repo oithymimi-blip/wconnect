@@ -1,28 +1,19 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
+import { derivePayoutState, sanitizeControlState, type PayoutControlState, DAY_MS } from '../utils/payoutControls'
 import type { Address } from 'viem'
 import { fetchWalletSnapshot, type WalletSnapshot } from '../lib/walletSummary'
 import {
   fetchAdminEvents,
   fetchSubscribers,
+  fetchPayoutControls,
+  updatePayoutControl,
   type AdminEventRecord,
   type AdminSubscriberRecord,
 } from '../lib/adminApi'
 import { AdminLogin } from '../components/AdminLogin'
 import { fetchSession, logout as logoutSession } from '../lib/auth'
 import { fetchAdminReferrals, type AdminReferralSummary } from '../lib/referrals'
-
-const DAY_MS = 24 * 60 * 60 * 1000
-const PAYOUT_CONTROLS_STORAGE_KEY = 'qa:admin_payout_controls'
-
-type PayoutControl = {
-  paused?: boolean
-  pauseRemainingMs?: number
-  adjustedNextPayoutAt?: number
-  adjustedLastApprovedAt?: number
-  cycleStartAt?: number
-  cycleMs?: number
-}
 
 type UpcomingPayoutRow = {
   address: Address
@@ -35,7 +26,7 @@ type UpcomingPayoutRow = {
   status: 'paused' | 'ready' | 'running'
   progress: number
   totalUsd?: number
-  control?: PayoutControl
+  control?: PayoutControlState
   isCycle: boolean
   cycleMs?: number
 }
@@ -113,17 +104,7 @@ export default function AdminPage() {
   const [isDailyPayoutOpen, setIsDailyPayoutOpen] = useState(false)
   const [copiedAddress, setCopiedAddress] = useState<string | null>(null)
   const [copiedReferralCode, setCopiedReferralCode] = useState<string | null>(null)
-  const [payoutControls, setPayoutControls] = useState<Record<string, PayoutControl>>(() => {
-    if (typeof window === 'undefined') return {}
-    try {
-      const raw = window.localStorage.getItem(PAYOUT_CONTROLS_STORAGE_KEY)
-      if (!raw) return {}
-      const parsed = JSON.parse(raw)
-      return parsed && typeof parsed === 'object' ? parsed : {}
-    } catch {
-      return {}
-    }
-  })
+  const [payoutControls, setPayoutControls] = useState<Record<string, PayoutControlState>>({})
   const isAuthorized = authState === 'authenticated'
 
   const addressEntries = useMemo(() => {
@@ -266,21 +247,42 @@ export default function AdminPage() {
     setReferralError(null)
   }, [])
 
-  useEffect(() => {
-    if (typeof window === 'undefined') return
-    try {
-      const cleaned = JSON.stringify(payoutControls)
-      window.localStorage.setItem(PAYOUT_CONTROLS_STORAGE_KEY, cleaned)
-    } catch {
-      // ignore write failures (private mode, etc.)
-    }
-  }, [payoutControls])
 
   useEffect(() => {
     if (!copiedAddress) return
     const timeout = window.setTimeout(() => setCopiedAddress(null), 2000)
     return () => window.clearTimeout(timeout)
   }, [copiedAddress])
+
+  useEffect(() => {
+    if (!isAuthorized) {
+      setPayoutControls({})
+      return
+    }
+    let cancelled = false
+    fetchPayoutControls()
+      .then((response) => {
+        if (cancelled) return
+        const source = response && typeof response === 'object' ? response : {}
+        const entries = Object.entries(source)
+          .map(([key, value]) => {
+            const cleaned = sanitizeControlState(value)
+            return cleaned ? [key, cleaned] : null
+          })
+          .filter(Boolean) as [string, PayoutControlState][]
+        const next: Record<string, PayoutControlState> = {}
+        for (const [key, value] of entries) {
+          next[key.toLowerCase()] = value
+        }
+        setPayoutControls(next)
+      })
+      .catch((error) => {
+        if (!cancelled) console.warn('Failed to load payout controls', error)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [isAuthorized])
 
   useEffect(() => {
     if (!copiedReferralCode) return
@@ -387,56 +389,48 @@ export default function AdminPage() {
     return Array.from(map.values())
   }, [events])
 
-  const sanitizePayoutControl = (control: PayoutControl | undefined): PayoutControl | undefined => {
-    if (!control) return undefined
-    const normalized: PayoutControl = { ...control }
-    if (!normalized.paused) {
-      delete normalized.paused
-      delete normalized.pauseRemainingMs
-    }
-    if (normalized.cycleMs !== undefined && normalized.cycleMs <= 0) {
-      delete normalized.cycleMs
-    }
-    const hasManualAdjust =
-      normalized.adjustedLastApprovedAt !== undefined || normalized.adjustedNextPayoutAt !== undefined
-    const hasCycle = typeof normalized.cycleStartAt === 'number'
-    const hasPause = Boolean(normalized.paused)
-    if (!hasManualAdjust) {
-      delete normalized.adjustedLastApprovedAt
-      delete normalized.adjustedNextPayoutAt
-    }
-    if (!hasCycle) {
-      delete normalized.cycleStartAt
-      delete normalized.cycleMs
-    }
-    if (!hasManualAdjust && !hasCycle && !hasPause) {
-      return undefined
-    }
-    return normalized
-  }
+  const persistPayoutControl = useCallback((address: Address, control?: PayoutControlState) => {
+    const payload = sanitizeControlState(control)
+    void updatePayoutControl(address, payload).catch((error) => {
+      console.warn('Failed to persist payout control', error)
+    })
+  }, [])
 
   const setControlForPayout = useCallback(
-    (payout: UpcomingPayoutRow, producer: (current?: PayoutControl) => PayoutControl | undefined) => {
+    (payout: UpcomingPayoutRow, producer: (current?: PayoutControlState) => PayoutControlState | undefined) => {
       const key = payout.address.toLowerCase()
+      let nextAddress: Address | null = null
+      let nextControl: PayoutControlState | undefined
       setPayoutControls((previous) => {
         const current = previous[key]
         const nextRaw = producer(current)
         if (!nextRaw) {
           if (current === undefined) return previous
+          nextAddress = payout.address
           const { [key]: _omit, ...rest } = previous
           return rest
         }
-        const cleaned = sanitizePayoutControl(nextRaw)
+        const cleaned = sanitizeControlState(nextRaw)
         if (!cleaned) {
           if (current === undefined) return previous
+          nextAddress = payout.address
           const { [key]: _omit, ...rest } = previous
           return rest
         }
-        const next = { ...previous, [key]: cleaned }
-        return next
+        const currentSerialized = current ? JSON.stringify(current) : null
+        const nextSerialized = JSON.stringify(cleaned)
+        if (currentSerialized === nextSerialized) {
+          return previous
+        }
+        nextAddress = payout.address
+        nextControl = cleaned
+        return { ...previous, [key]: cleaned }
       })
+      if (nextAddress) {
+        persistPayoutControl(nextAddress, nextControl)
+      }
     },
-    []
+    [persistPayoutControl]
   )
 
   const upcomingPayouts = useMemo<UpcomingPayoutRow[]>(() => {
@@ -445,83 +439,21 @@ export default function AdminPage() {
         const lower = summary.address.toLowerCase()
         const control = payoutControls[lower]
         const totalUsd = snapshots[lower]?.totalUsd
-        const baseLast = summary.lastApprovedAt
-        const baseNext = summary.nextPayoutAt
-
-        let lastApprovedAt = baseLast
-        let scheduledNext = baseNext
-        let remaining = Math.max(scheduledNext - nowTs, 0)
-        let status: 'paused' | 'ready' | 'running' = remaining <= 0 ? 'ready' : 'running'
-        let resumeAt = status === 'ready' ? nowTs : scheduledNext
-        let isCycle = false
-        let cycleMs = control?.cycleMs && control.cycleMs > 0 ? control.cycleMs : DAY_MS
-
-        if (control) {
-          const hasCycle = typeof control.cycleStartAt === 'number'
-          if (control.paused) {
-            remaining = Math.max(control.pauseRemainingMs ?? remaining, 0)
-            status = 'paused'
-            resumeAt = nowTs + remaining
-            if (hasCycle) {
-              isCycle = true
-              scheduledNext = resumeAt
-              lastApprovedAt = scheduledNext - cycleMs
-            } else {
-              lastApprovedAt = control.adjustedLastApprovedAt ?? baseLast
-              scheduledNext = resumeAt
-            }
-          } else if (hasCycle) {
-            isCycle = true
-            const cycleStart = control.cycleStartAt ?? baseNext
-            const safeCycleMs = cycleMs > 0 ? cycleMs : DAY_MS
-            let effectiveStart = Number.isFinite(cycleStart) ? cycleStart : baseNext
-
-            if (nowTs < effectiveStart) {
-              scheduledNext = effectiveStart
-              lastApprovedAt = Math.max(baseLast, scheduledNext - safeCycleMs)
-            } else {
-              const elapsed = nowTs - effectiveStart
-              const cyclesElapsed = Math.floor(elapsed / safeCycleMs)
-              lastApprovedAt = Math.max(baseLast, effectiveStart + cyclesElapsed * safeCycleMs)
-              scheduledNext = lastApprovedAt + safeCycleMs
-              if (scheduledNext <= nowTs) {
-                const nextCycle = cyclesElapsed + 1
-                lastApprovedAt = Math.max(baseLast, effectiveStart + nextCycle * safeCycleMs)
-                scheduledNext = lastApprovedAt + safeCycleMs
-              }
-            }
-
-            remaining = Math.max(scheduledNext - nowTs, 0)
-            status = 'running'
-            resumeAt = scheduledNext
-            cycleMs = safeCycleMs
-          } else {
-            lastApprovedAt = control.adjustedLastApprovedAt ?? baseLast
-            scheduledNext = control.adjustedNextPayoutAt ?? baseNext
-            remaining = Math.max(scheduledNext - nowTs, 0)
-            status = remaining <= 0 ? 'ready' : 'running'
-            resumeAt = status === 'ready' ? nowTs : scheduledNext
-          }
-        }
-
-        const totalDuration = Math.max(scheduledNext - lastApprovedAt, DAY_MS)
-        const elapsed = Math.max(totalDuration - remaining, 0)
-        const progress = totalDuration > 0 ? Math.min(1, Math.max(0, elapsed / totalDuration)) : 1
-
+        const derived = derivePayoutState(summary.lastApprovedAt, summary.nextPayoutAt, control, nowTs)
         return {
           address: summary.address,
-          baseLastApprovedAt: baseLast,
-          baseNextPayoutAt: baseNext,
-          lastApprovedAt,
-          scheduledNextPayoutAt: scheduledNext,
-          resumeAt,
-          remaining,
-          status,
-          progress,
+          baseLastApprovedAt: summary.lastApprovedAt,
+          baseNextPayoutAt: summary.nextPayoutAt,
+          lastApprovedAt: derived.lastApprovedAt,
+          scheduledNextPayoutAt: derived.nextPayoutAt,
+          resumeAt: derived.resumeAt,
+          remaining: derived.remaining,
+          status: derived.status,
+          progress: derived.progress,
           totalUsd,
           control,
-          isCycle,
-          cycleMs: isCycle ? cycleMs : undefined,
+          isCycle: derived.isCycle,
+          cycleMs: derived.cycleMs,
         }
       })
       .sort((a, b) => a.resumeAt - b.resumeAt)
@@ -530,7 +462,6 @@ export default function AdminPage() {
   const readyToSettleCount = useMemo(() => {
     return upcomingPayouts.filter((payout) => payout.status === 'ready').length
   }, [upcomingPayouts])
-
   const handlePausePayout = useCallback(
     (payout: UpcomingPayoutRow) => {
       if (payout.status === 'paused') return

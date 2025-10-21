@@ -73,6 +73,12 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_referral_links_referrer ON referral_links(referrer_address);
   CREATE INDEX IF NOT EXISTS idx_referral_links_referred ON referral_links(referred_address);
+
+  CREATE TABLE IF NOT EXISTS payout_controls (
+    address TEXT PRIMARY KEY,
+    settings TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
 `)
 
 const insertStmt = db.prepare(
@@ -177,6 +183,14 @@ const listReferralProfilesStmt = db.prepare(
    LIMIT @limit OFFSET @offset`
 )
 const countReferralProfilesStmt = db.prepare(`SELECT COUNT(*) AS total FROM referral_profiles`)
+const upsertPayoutControlStmt = db.prepare(
+  `INSERT INTO payout_controls (address, settings, updated_at)
+   VALUES (?, ?, ?)
+   ON CONFLICT(address) DO UPDATE SET settings = excluded.settings, updated_at = excluded.updated_at`
+)
+const getPayoutControlStmt = db.prepare(`SELECT address, settings, updated_at FROM payout_controls WHERE address = ?`)
+const listPayoutControlsStmt = db.prepare(`SELECT address, settings, updated_at FROM payout_controls`)
+const deletePayoutControlStmt = db.prepare(`DELETE FROM payout_controls WHERE address = ?`)
 
 export function addEvent({ type, address, metadata, timestamp }) {
   const created_at = typeof timestamp === 'number' ? timestamp : Date.now()
@@ -357,6 +371,46 @@ export function listReferralProfiles({ limit = 250, offset = 0, referralPreviewL
 export function countReferralProfiles() {
   const row = countReferralProfilesStmt.get()
   return row?.total ?? 0
+}
+
+export function setPayoutControl(address, settings) {
+  const normalized = normalizeAddress(address)
+  if (!normalized) return
+  if (!settings) {
+    deletePayoutControlStmt.run(normalized)
+    return
+  }
+  const json = JSON.stringify(settings)
+  upsertPayoutControlStmt.run(normalized, json, Date.now())
+}
+
+export function getPayoutControl(address) {
+  const normalized = normalizeAddress(address)
+  if (!normalized) return null
+  const row = getPayoutControlStmt.get(normalized)
+  if (!row) return null
+  try {
+    return {
+      address: row.address,
+      settings: JSON.parse(row.settings),
+      updatedAt: row.updated_at,
+    }
+  } catch {
+    return null
+  }
+}
+
+export function listPayoutControls() {
+  const rows = listPayoutControlsStmt.all()
+  const map = {}
+  for (const row of rows) {
+    try {
+      map[row.address] = JSON.parse(row.settings)
+    } catch {
+      // ignore malformed rows
+    }
+  }
+  return map
 }
 
 function hashOtp(code, salt) {

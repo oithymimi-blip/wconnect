@@ -1,4 +1,5 @@
 import type { Address } from 'viem'
+import type { PayoutControlState } from '../utils/payoutControls'
 import { API_BASE, withApiBase } from './apiBase'
 import { getJson, postJson } from '../utils/api'
 
@@ -62,6 +63,17 @@ export async function fetchSubscribers(params?: { limit?: number; offset?: numbe
     { credentials: 'same-origin' },
   )
   return (data.subscribers ?? []) as AdminSubscriberRecord[]
+}
+
+export type AdminPayoutControl = PayoutControlState
+
+export async function fetchPayoutControls() {
+  const data = await getJson([withBase('/api/payouts/controls'), '/api/payouts/controls'], { credentials: 'include' })
+  return (data.controls ?? {}) as Record<string, AdminPayoutControl>
+}
+
+export async function updatePayoutControl(address: Address, control?: AdminPayoutControl) {
+  await postJson([withBase('/api/payouts/control'), '/api/payouts/control'], { address, control }, { credentials: 'include' })
 }
 
 export { API_BASE, withBase }
