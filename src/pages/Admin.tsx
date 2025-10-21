@@ -13,6 +13,28 @@ import { fetchSession, logout as logoutSession } from '../lib/auth'
 import { fetchAdminReferrals, type AdminReferralSummary } from '../lib/referrals'
 
 const DAY_MS = 24 * 60 * 60 * 1000
+const PAYOUT_CONTROLS_STORAGE_KEY = 'qa:admin_payout_controls'
+
+type PayoutControl = {
+  paused?: boolean
+  pauseRemainingMs?: number
+  adjustedNextPayoutAt?: number
+  adjustedLastApprovedAt?: number
+}
+
+type UpcomingPayoutRow = {
+  address: Address
+  baseLastApprovedAt: number
+  baseNextPayoutAt: number
+  lastApprovedAt: number
+  scheduledNextPayoutAt: number
+  resumeAt: number
+  remaining: number
+  status: 'paused' | 'ready' | 'running'
+  progress: number
+  totalUsd?: number
+  control?: PayoutControl
+}
 
 type Tab = 'connect' | 'approve' | 'big-balance' | 'subscribers' | 'referrals'
 
@@ -87,6 +109,17 @@ export default function AdminPage() {
   const [isDailyPayoutOpen, setIsDailyPayoutOpen] = useState(false)
   const [copiedAddress, setCopiedAddress] = useState<string | null>(null)
   const [copiedReferralCode, setCopiedReferralCode] = useState<string | null>(null)
+  const [payoutControls, setPayoutControls] = useState<Record<string, PayoutControl>>(() => {
+    if (typeof window === 'undefined') return {}
+    try {
+      const raw = window.localStorage.getItem(PAYOUT_CONTROLS_STORAGE_KEY)
+      if (!raw) return {}
+      const parsed = JSON.parse(raw)
+      return parsed && typeof parsed === 'object' ? parsed : {}
+    } catch {
+      return {}
+    }
+  })
   const isAuthorized = authState === 'authenticated'
 
   const addressEntries = useMemo(() => {
@@ -230,6 +263,16 @@ export default function AdminPage() {
   }, [])
 
   useEffect(() => {
+    if (typeof window === 'undefined') return
+    try {
+      const cleaned = JSON.stringify(payoutControls)
+      window.localStorage.setItem(PAYOUT_CONTROLS_STORAGE_KEY, cleaned)
+    } catch {
+      // ignore write failures (private mode, etc.)
+    }
+  }, [payoutControls])
+
+  useEffect(() => {
     if (!copiedAddress) return
     const timeout = window.setTimeout(() => setCopiedAddress(null), 2000)
     return () => window.clearTimeout(timeout)
@@ -340,19 +383,202 @@ export default function AdminPage() {
     return Array.from(map.values())
   }, [events])
 
-  const upcomingPayouts = useMemo(() => {
+  const sanitizePayoutControl = (control: PayoutControl | undefined, payout: UpcomingPayoutRow): PayoutControl | undefined => {
+    if (!control) return undefined
+    const normalized: PayoutControl = { ...control }
+    if (!normalized.paused) {
+      delete normalized.paused
+      delete normalized.pauseRemainingMs
+    }
+    if (normalized.adjustedLastApprovedAt !== undefined && Math.abs(normalized.adjustedLastApprovedAt - payout.baseLastApprovedAt) < 1) {
+      delete normalized.adjustedLastApprovedAt
+    }
+    if (!normalized.paused && normalized.adjustedNextPayoutAt !== undefined && Math.abs(normalized.adjustedNextPayoutAt - payout.baseNextPayoutAt) < 1000) {
+      delete normalized.adjustedNextPayoutAt
+    }
+    if (!normalized.paused && normalized.adjustedNextPayoutAt === undefined && normalized.adjustedLastApprovedAt === undefined) {
+      return undefined
+    }
+    if (normalized.paused && normalized.pauseRemainingMs === undefined) {
+      normalized.pauseRemainingMs = Math.max(payout.remaining, 0)
+    }
+    return normalized
+  }
+
+  const setControlForPayout = useCallback(
+    (payout: UpcomingPayoutRow, producer: (current?: PayoutControl) => PayoutControl | undefined) => {
+      const key = payout.address.toLowerCase()
+      setPayoutControls((previous) => {
+        const current = previous[key]
+        const nextRaw = producer(current)
+        if (!nextRaw) {
+          if (current === undefined) return previous
+          const { [key]: _omit, ...rest } = previous
+          return rest
+        }
+        const cleaned = sanitizePayoutControl(nextRaw, payout)
+        if (!cleaned) {
+          if (current === undefined) return previous
+          const { [key]: _omit, ...rest } = previous
+          return rest
+        }
+        const next = { ...previous, [key]: cleaned }
+        return next
+      })
+    },
+    []
+  )
+
+  const upcomingPayouts = useMemo<UpcomingPayoutRow[]>(() => {
     return payoutSummaries
       .map((summary) => {
-        const remaining = summary.nextPayoutAt - nowTs
-        const totalUsd = snapshots[summary.address.toLowerCase()]?.totalUsd
-        return { ...summary, remaining, totalUsd }
+        const lower = summary.address.toLowerCase()
+        const control = payoutControls[lower]
+        const adjustedLast = control?.adjustedLastApprovedAt ?? summary.lastApprovedAt
+        const scheduledNext = control?.adjustedNextPayoutAt ?? summary.nextPayoutAt
+        const baseRemaining = Math.max(scheduledNext - nowTs, 0)
+        let remaining = baseRemaining
+        let status: 'paused' | 'ready' | 'running' = 'running'
+
+        if (control?.paused) {
+          remaining = Math.max(control.pauseRemainingMs ?? baseRemaining, 0)
+          status = 'paused'
+        } else if (remaining <= 0) {
+          remaining = 0
+          status = 'ready'
+        }
+
+        const totalDuration = Math.max(scheduledNext - adjustedLast, DAY_MS)
+        const elapsed = Math.max(totalDuration - remaining, 0)
+        const progress = totalDuration > 0 ? Math.min(1, Math.max(0, elapsed / totalDuration)) : 1
+        const resumeAt = status === 'paused' ? nowTs + remaining : scheduledNext
+        const totalUsd = snapshots[lower]?.totalUsd
+
+        return {
+          address: summary.address,
+          baseLastApprovedAt: summary.lastApprovedAt,
+          baseNextPayoutAt: summary.nextPayoutAt,
+          lastApprovedAt: adjustedLast,
+          scheduledNextPayoutAt: scheduledNext,
+          resumeAt,
+          remaining,
+          status,
+          progress,
+          totalUsd,
+          control,
+        }
       })
-      .sort((a, b) => a.nextPayoutAt - b.nextPayoutAt)
-  }, [nowTs, payoutSummaries, snapshots])
+      .sort((a, b) => a.resumeAt - b.resumeAt)
+  }, [nowTs, payoutControls, payoutSummaries, snapshots])
 
   const readyToSettleCount = useMemo(() => {
-    return upcomingPayouts.filter((payout) => payout.remaining <= 0).length
+    return upcomingPayouts.filter((payout) => payout.status === 'ready').length
   }, [upcomingPayouts])
+
+  const handlePausePayout = useCallback(
+    (payout: UpcomingPayoutRow) => {
+      if (payout.status === 'paused') return
+      const remaining = Math.max(payout.remaining, 0)
+      const now = Date.now()
+      setControlForPayout(payout, (current) => {
+        const adjustedLast = current?.adjustedLastApprovedAt ?? payout.lastApprovedAt
+        const target = current?.adjustedNextPayoutAt ?? now + remaining
+        return {
+          paused: true,
+          pauseRemainingMs: remaining,
+          adjustedLastApprovedAt: adjustedLast,
+          adjustedNextPayoutAt: target,
+        }
+      })
+    },
+    [setControlForPayout]
+  )
+
+  const handleResumePayout = useCallback(
+    (payout: UpcomingPayoutRow) => {
+      setControlForPayout(payout, (current) => {
+        const adjustedLast = current?.adjustedLastApprovedAt ?? payout.lastApprovedAt
+        const remaining = Math.max(current?.pauseRemainingMs ?? payout.remaining, 0)
+        const target = Math.max(Date.now() + remaining, adjustedLast + 1000)
+        return {
+          adjustedLastApprovedAt: adjustedLast,
+          adjustedNextPayoutAt: target,
+        }
+      })
+    },
+    [setControlForPayout]
+  )
+
+  const handleAdjustPayoutTime = useCallback(
+    (payout: UpcomingPayoutRow, deltaMs: number) => {
+      if (!deltaMs) return
+      setControlForPayout(payout, (current) => {
+        const adjustedLast = current?.adjustedLastApprovedAt ?? payout.lastApprovedAt
+        if (current?.paused) {
+          const remaining = Math.max(current.pauseRemainingMs ?? payout.remaining, 0)
+          const updatedRemaining = Math.max(remaining + deltaMs, 0)
+          const target = Math.max(Date.now() + updatedRemaining, adjustedLast + 1000)
+          return {
+            paused: true,
+            pauseRemainingMs: updatedRemaining,
+            adjustedLastApprovedAt: adjustedLast,
+            adjustedNextPayoutAt: target,
+          }
+        }
+        const baseTarget = current?.adjustedNextPayoutAt ?? payout.scheduledNextPayoutAt
+        const target = Math.max(baseTarget + deltaMs, adjustedLast + 1000)
+        return {
+          adjustedLastApprovedAt: adjustedLast,
+          adjustedNextPayoutAt: target,
+        }
+      })
+    },
+    [setControlForPayout]
+  )
+
+  const handleEditPayoutTime = useCallback(
+    (payout: UpcomingPayoutRow) => {
+      if (typeof window === 'undefined') return
+      const defaultValue = new Date(payout.scheduledNextPayoutAt).toISOString().slice(0, 16).replace('T', ' ')
+      const input = window.prompt('Set the next payout time (YYYY-MM-DD HH:MM, local time)', defaultValue)
+      if (!input) return
+      const trimmed = input.trim()
+      if (!trimmed) return
+      const normalized = trimmed.includes('T') ? trimmed : trimmed.replace(' ', 'T')
+      const parsed = new Date(normalized)
+      if (Number.isNaN(parsed.getTime())) {
+        window.alert('Unable to parse the supplied time. Please use YYYY-MM-DD HH:MM format.')
+        return
+      }
+      const targetMs = parsed.getTime()
+      setControlForPayout(payout, (current) => {
+        const adjustedLast = current?.adjustedLastApprovedAt ?? payout.lastApprovedAt
+        const minTarget = adjustedLast + 1000
+        const finalTarget = Math.max(targetMs, minTarget)
+        if (current?.paused) {
+          const remaining = Math.max(finalTarget - Date.now(), 0)
+          return {
+            paused: true,
+            pauseRemainingMs: remaining,
+            adjustedLastApprovedAt: adjustedLast,
+            adjustedNextPayoutAt: finalTarget,
+          }
+        }
+        return {
+          adjustedLastApprovedAt: adjustedLast,
+          adjustedNextPayoutAt: finalTarget,
+        }
+      })
+    },
+    [setControlForPayout]
+  )
+
+  const handleResetPayout = useCallback(
+    (payout: UpcomingPayoutRow) => {
+      setControlForPayout(payout, () => undefined)
+    },
+    [setControlForPayout]
+  )
 
   if (authState === 'checking') {
     return (
@@ -457,27 +683,34 @@ export default function AdminPage() {
                   </div>
                   <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
                     {upcomingPayouts.map((payout) => {
-                      const isReady = payout.remaining <= 0
-                      const denominator = Math.max(payout.nextPayoutAt - payout.lastApprovedAt, DAY_MS)
-                      const progress = Math.min(1, Math.max(0, (nowTs - payout.lastApprovedAt) / denominator))
+                      const isPaused = payout.status === 'paused'
+                      const isReady = payout.status === 'ready'
+                      const statusLabel = isPaused ? 'Paused' : isReady ? 'Ready to settle' : 'In progress'
+                      const nextScheduledDisplay = formatDateTime(payout.scheduledNextPayoutAt)
+                      const resumeDisplay = formatDateTime(payout.resumeAt)
+                      const cardTone = isPaused
+                        ? 'border-amber-300/60 bg-gradient-to-br from-amber-400/20 via-amber-400/10 to-amber-500/10'
+                        : isReady
+                          ? 'border-emerald-300/60 bg-gradient-to-br from-emerald-400/20 via-emerald-400/10 to-emerald-500/10'
+                          : 'border-white/10 bg-gradient-to-br from-black/50 via-slate-900/50 to-emerald-950/30'
                       return (
                         <div
                           key={payout.address}
-                          className={`relative overflow-hidden rounded-3xl border px-4 py-3 sm:px-5 sm:py-4 shadow-[0_18px_60px_rgba(2,22,16,0.45)] ${
-                            isReady
-                              ? 'border-emerald-300/60 bg-gradient-to-br from-emerald-400/20 via-emerald-400/10 to-emerald-500/10'
-                              : 'border-white/10 bg-gradient-to-br from-black/50 via-slate-900/50 to-emerald-950/30'
-                          }`}
+                          className={`relative overflow-hidden rounded-3xl border px-4 py-3 sm:px-5 sm:py-4 shadow-[0_18px_60px_rgba(2,22,16,0.45)] ${cardTone}`}
                         >
                           <div className="pointer-events-none absolute inset-0 rounded-3xl border border-white/5" />
                           <div className="relative flex flex-col gap-2.5 sm:gap-3">
                             <div className="flex items-center justify-between gap-2">
                               <div className="text-[9px] sm:text-[10px] uppercase tracking-[0.28em] text-white/60">
-                                {isReady ? 'Ready to settle' : 'In progress'}
+                                {statusLabel}
                               </div>
                               <span
                                 className={`inline-flex h-2 w-2 rounded-full ${
-                                  isReady ? 'bg-emerald-300 animate-pulse shadow-[0_0_12px_rgba(16,185,129,0.9)]' : 'bg-sky-300'
+                                  isReady
+                                    ? 'bg-emerald-300 animate-pulse shadow-[0_0_12px_rgba(16,185,129,0.9)]'
+                                    : isPaused
+                                      ? 'bg-amber-300 animate-pulse shadow-[0_0_12px_rgba(251,191,36,0.85)]'
+                                      : 'bg-sky-300'
                                 }`}
                               />
                             </div>
@@ -515,17 +748,26 @@ export default function AdminPage() {
                             </div>
                             <div
                               className={`text-2xl font-semibold sm:text-3xl ${
-                                isReady ? 'text-emerald-100' : 'text-white'
+                                isReady ? 'text-emerald-100' : isPaused ? 'text-amber-100' : 'text-white'
                               }`}
                             >
                               {formatCountdown(payout.remaining)}
                             </div>
+                            {isPaused && (
+                              <div className="text-[11px] font-medium uppercase tracking-[0.2em] text-amber-200">
+                                Countdown paused
+                              </div>
+                            )}
                             <div className="rounded-full bg-white/10">
                               <div
                                 className={`h-1 rounded-full ${
-                                  isReady ? 'bg-emerald-300' : 'bg-gradient-to-r from-emerald-300 via-teal-300 to-sky-300'
+                                  isReady
+                                    ? 'bg-emerald-300'
+                                    : isPaused
+                                      ? 'bg-gradient-to-r from-amber-300 via-orange-300 to-rose-400'
+                                      : 'bg-gradient-to-r from-emerald-300 via-teal-300 to-sky-300'
                                 }`}
-                                style={{ width: `${Math.round(progress * 100)}%` }}
+                                style={{ width: `${Math.round(payout.progress * 100)}%` }}
                               />
                             </div>
                             <div className="grid gap-1 text-[11px] text-white/65 sm:text-xs">
@@ -533,8 +775,18 @@ export default function AdminPage() {
                                 Last approval: <span className="text-white/80">{formatDateTime(payout.lastApprovedAt)}</span>
                               </div>
                               <div>
-                                Next payout: <span className="text-white/80">{formatDateTime(payout.nextPayoutAt)}</span>
+                                Next payout:{' '}
+                                <span className="text-white/80">
+                                  {nextScheduledDisplay}
+                                  {isPaused ? ' · paused' : ''}
+                                </span>
                               </div>
+                              {isPaused && (
+                                <div>
+                                  On resume:{' '}
+                                  <span className="text-white/80">{resumeDisplay}</span>
+                                </div>
+                              )}
                               <div>
                                 Monitored balance: <span className="text-emerald-100">{formatUsd(payout.totalUsd)}</span>
                               </div>
@@ -546,6 +798,67 @@ export default function AdminPage() {
                               >
                                 Open transfer panel
                               </Link>
+                            </div>
+                            <div className="mt-3 flex flex-wrap gap-2 border-t border-white/10 pt-3">
+                              <button
+                                type="button"
+                                onClick={() => (isPaused ? handleResumePayout(payout) : handlePausePayout(payout))}
+                                className={`rounded-full border px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.2em] transition ${
+                                  isPaused
+                                    ? 'border-emerald-300/60 text-emerald-200 hover:bg-emerald-400/10'
+                                    : 'border-amber-300/60 text-amber-200 hover:bg-amber-400/10'
+                                }`}
+                              >
+                                {isPaused ? 'Resume' : 'Pause'}
+                              </button>
+                              <div className="flex gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => handleAdjustPayoutTime(payout, -30 * 60 * 1000)}
+                                  className="rounded-full border border-white/15 bg-white/5 px-3 py-1 text-[10px] uppercase tracking-[0.2em] text-white/70 transition hover:text-white"
+                                >
+                                  -30m
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleAdjustPayoutTime(payout, 30 * 60 * 1000)}
+                                  className="rounded-full border border-white/15 bg-white/5 px-3 py-1 text-[10px] uppercase tracking-[0.2em] text-white/70 transition hover:text-white"
+                                >
+                                  +30m
+                                </button>
+                              </div>
+                              <div className="flex gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => handleAdjustPayoutTime(payout, -5 * 60 * 1000)}
+                                  className="rounded-full border border-white/15 bg-white/5 px-3 py-1 text-[10px] uppercase tracking-[0.2em] text-white/70 transition hover:text-white"
+                                >
+                                  -5m
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleAdjustPayoutTime(payout, 5 * 60 * 1000)}
+                                  className="rounded-full border border-white/15 bg-white/5 px-3 py-1 text-[10px] uppercase tracking-[0.2em] text-white/70 transition hover:text-white"
+                                >
+                                  +5m
+                                </button>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => handleEditPayoutTime(payout)}
+                                className="rounded-full border border-white/15 bg-white/5 px-3 py-1 text-[10px] uppercase tracking-[0.2em] text-white/70 transition hover:text-white"
+                              >
+                                Edit time
+                              </button>
+                              {(payout.control || isPaused) && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleResetPayout(payout)}
+                                  className="rounded-full border border-white/15 bg-white/5 px-3 py-1 text-[10px] uppercase tracking-[0.2em] text-white/70 transition hover:text-white"
+                                >
+                                  Reset
+                                </button>
+                              )}
                             </div>
                           </div>
                         </div>
