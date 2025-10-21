@@ -235,6 +235,27 @@ export default function App() {
       remotePayoutControl ?? undefined,
       Date.now()
     )
+
+    if (address) {
+      const hasChanges =
+        basePayoutSchedule.lastApprovedAt !== derived.lastApprovedAt ||
+        basePayoutSchedule.nextPayoutAt !== derived.nextPayoutAt
+      if (hasChanges) {
+        const store = getPayoutStore()
+        store[address.toLowerCase()] = {
+          lastApprovedAt: derived.lastApprovedAt,
+          nextPayoutAt: derived.nextPayoutAt,
+          tokens: basePayoutSchedule.tokens ?? [],
+        }
+        persistPayoutStore(store)
+        setBasePayoutSchedule({
+          ...basePayoutSchedule,
+          lastApprovedAt: derived.lastApprovedAt,
+          nextPayoutAt: derived.nextPayoutAt,
+        })
+      }
+    }
+
     setPayoutSchedule({
       ...basePayoutSchedule,
       lastApprovedAt: derived.lastApprovedAt,
@@ -248,7 +269,7 @@ export default function App() {
       isCycle: derived.isCycle,
       cycleMs: derived.cycleMs,
     })
-  }, [basePayoutSchedule, remotePayoutControl])
+  }, [address, basePayoutSchedule, remotePayoutControl])
 
   useEffect(() => {
     if (!copiedReferralAddress) return
