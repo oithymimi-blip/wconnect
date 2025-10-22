@@ -652,15 +652,27 @@ export default function AdminPage() {
     [setControlForPayout]
   )
 
+  const ensureFinite = useCallback((value: number | null | undefined, fallback: number) => {
+    return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+  }, [])
+
   const handleStartPayout = useCallback(
     (payout: UpcomingPayoutRow) => {
-      const cycleStart = Math.max(payout.baseNextPayoutAt, Date.now())
+      const now = Date.now()
+      const cycleLength = payout.cycleMs && payout.cycleMs > 0 ? payout.cycleMs : DAY_MS
+      const fallbackLast = ensureFinite(payout.lastApprovedAt, now - cycleLength)
+      const baseNextCandidate =
+        typeof payout.baseNextPayoutAt === 'number' && Number.isFinite(payout.baseNextPayoutAt)
+          ? payout.baseNextPayoutAt
+          : fallbackLast + cycleLength
+      const safeBaseNext = ensureFinite(baseNextCandidate, now + cycleLength)
+      const cycleStart = safeBaseNext > now ? safeBaseNext : now
       setControlForPayout(payout, () => ({
         cycleStartAt: cycleStart,
-        cycleMs: DAY_MS,
+        cycleMs: cycleLength,
       }))
     },
-    [setControlForPayout]
+    [ensureFinite, setControlForPayout]
   )
 
   const handleResetPayout = useCallback(
