@@ -372,7 +372,7 @@ function deriveEffectivePayoutSchedule(control, schedule, now = Date.now()) {
   }
 }
 
-function buildPayoutControlResponse(record, now = Date.now()) {
+function buildPayoutControlResponse(record, now = Date.now(), address = null, persist = false) {
   if (!record) {
     return { control: null, schedule: null }
   }
@@ -385,6 +385,34 @@ function buildPayoutControlResponse(record, now = Date.now()) {
         }
       : null
   const derived = deriveEffectivePayoutSchedule(control, scheduleBase, now)
+  if (persist && address && derived) {
+    const baseNext = scheduleBase?.nextPayoutAt ?? null
+    const baseLast = scheduleBase?.lastApprovedAt ?? null
+    let shouldPersist = false
+    if (baseNext === null || baseLast === null) {
+      shouldPersist = true
+    } else if (control?.cycleStartAt) {
+      const nextDiff = Math.abs(derived.nextPayoutAt - baseNext)
+      const lastDiff = Math.abs(derived.lastApprovedAt - baseLast)
+      if (nextDiff >= DAY_MS || lastDiff >= DAY_MS) {
+        shouldPersist = true
+      }
+    }
+    if (shouldPersist) {
+      try {
+        setPayoutControl(
+          address,
+          control ?? undefined,
+          {
+            lastApprovedAt: derived.lastApprovedAt,
+            nextPayoutAt: derived.nextPayoutAt,
+          },
+        )
+      } catch (error) {
+        console.warn('Failed to persist derived payout schedule', { address }, error)
+      }
+    }
+  }
   return {
     control,
     schedule: derived,
@@ -510,7 +538,7 @@ app.get('/api/payouts/control/:address', (req, res) => {
   if (!record) {
     return res.json({ control: null, schedule: null })
   }
-  const response = buildPayoutControlResponse(record)
+  const response = buildPayoutControlResponse(record, Date.now(), address, true)
   res.json(response)
 })
 
@@ -526,7 +554,9 @@ app.get('/api/payouts/controls', requireAdmin, (req, res) => {
           lastApprovedAt: payload?.lastApprovedAt ?? null,
           nextPayoutAt: payload?.nextPayoutAt ?? null,
         },
-        now
+        now,
+        addr,
+        true
       )
       normalized[addr] = response
     }
@@ -552,7 +582,7 @@ app.post('/api/payouts/control', requireAdmin, (req, res) => {
       const controlPayload = normalized ?? {}
       setPayoutControl(address, controlPayload, schedule ?? null)
       const latest = getPayoutControl(address)
-      const snapshot = buildPayoutControlResponse(latest)
+      const snapshot = buildPayoutControlResponse(latest, Date.now(), address, false)
       res.json({
         status: 'stored',
         control: snapshot.control ?? controlPayload,
