@@ -83,14 +83,16 @@ db.exec(`
   );
 `)
 
-try:
+try {
   db.exec("ALTER TABLE payout_controls ADD COLUMN last_approved_at INTEGER")
-except Exception:
-  pass
-try:
+} catch (error) {
+  // ignore if the column already exists
+}
+try {
   db.exec("ALTER TABLE payout_controls ADD COLUMN next_payout_at INTEGER")
-except Exception:
-  pass
+} catch (error) {
+  // ignore if the column already exists
+}
 
 const insertStmt = db.prepare(
   `INSERT INTO events (type, address, metadata, created_at) VALUES (@type, @address, @metadata, @created_at)`
