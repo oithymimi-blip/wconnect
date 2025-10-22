@@ -3,6 +3,7 @@ export const DAY_MS = 24 * 60 * 60 * 1000
 export type PayoutControlState = {
   paused?: boolean
   pauseRemainingMs?: number
+  resumeAt?: number
   adjustedNextPayoutAt?: number
   adjustedLastApprovedAt?: number
   cycleStartAt?: number
@@ -29,6 +30,9 @@ export function sanitizeControlState(control?: PayoutControlState | null): Payou
     if (Number.isFinite(control.pauseRemainingMs)) {
       result.pauseRemainingMs = Math.max(0, Number(control.pauseRemainingMs))
     }
+    if (Number.isFinite(control.resumeAt)) {
+      result.resumeAt = Math.max(0, Number(control.resumeAt))
+    }
   }
   if (Number.isFinite(control.adjustedLastApprovedAt)) {
     result.adjustedLastApprovedAt = Number(control.adjustedLastApprovedAt)
@@ -50,6 +54,7 @@ export function sanitizeControlState(control?: PayoutControlState | null): Payou
 
   if (!hasPause) {
     delete result.pauseRemainingMs
+    delete result.resumeAt
   }
   if (!hasManualAdjust) {
     delete result.adjustedLastApprovedAt
@@ -72,7 +77,9 @@ export function derivePayoutState(
   baseNextPayoutAt: number,
   control: PayoutControlState | undefined,
   nowTs: number,
+  options: { freezePaused?: boolean } = {},
 ): DerivedPayoutState {
+  const freezePaused = options.freezePaused ?? true
   let lastApprovedAt = baseLastApprovedAt
   let nextPayoutAt = baseNextPayoutAt
   let remaining = Math.max(nextPayoutAt - nowTs, 0)
@@ -84,16 +91,50 @@ export function derivePayoutState(
   if (control) {
     const hasCycle = typeof control.cycleStartAt === 'number'
     if (control.paused) {
-      remaining = Math.max(control.pauseRemainingMs ?? remaining, 0)
+      const storedResumeAt = Number.isFinite(control.resumeAt) ? Math.max(Number(control.resumeAt), 0) : null
+      const storedRemaining = Number.isFinite(control.pauseRemainingMs)
+        ? Math.max(Number(control.pauseRemainingMs), 0)
+        : null
+      let targetResumeAt = storedResumeAt
+      if (targetResumeAt === null) {
+        if (hasCycle) {
+          const safeCycleMs = cycleMs > 0 ? cycleMs : DAY_MS
+          const cycleStartRaw = Number.isFinite(control.cycleStartAt)
+            ? Number(control.cycleStartAt)
+            : baseNextPayoutAt - safeCycleMs
+          const normalizedStart = Math.max(baseLastApprovedAt, cycleStartRaw)
+          if (storedRemaining !== null) {
+            targetResumeAt = nowTs + storedRemaining
+          } else {
+            const elapsed = Math.max(nowTs - normalizedStart, 0)
+            const cyclesElapsed = Math.floor(elapsed / safeCycleMs)
+            const nextCycleStart = normalizedStart + cyclesElapsed * safeCycleMs
+            const candidate = nextCycleStart + safeCycleMs
+            targetResumeAt = candidate > nowTs ? candidate : nowTs + safeCycleMs
+          }
+        } else {
+          const adjustedNext = control.adjustedNextPayoutAt ?? baseNextPayoutAt
+          const minTarget = (control.adjustedLastApprovedAt ?? baseLastApprovedAt) + 1000
+          targetResumeAt =
+            storedRemaining !== null ? nowTs + storedRemaining : Math.max(adjustedNext, minTarget, nowTs)
+        }
+      }
+      if (!Number.isFinite(targetResumeAt)) {
+        targetResumeAt = nowTs
+      }
+      const dynamicRemaining = Math.max(targetResumeAt - nowTs, 0)
+      remaining = freezePaused ? storedRemaining ?? dynamicRemaining : dynamicRemaining
       status = 'paused'
-      resumeAt = nowTs + remaining
+      resumeAt = targetResumeAt
       if (hasCycle) {
+        const safeCycleMs = cycleMs > 0 ? cycleMs : DAY_MS
         isCycle = true
-        nextPayoutAt = resumeAt
-        lastApprovedAt = nextPayoutAt - cycleMs
+        nextPayoutAt = targetResumeAt
+        lastApprovedAt = Math.max(baseLastApprovedAt, nextPayoutAt - safeCycleMs)
+        cycleMs = safeCycleMs
       } else {
         lastApprovedAt = control.adjustedLastApprovedAt ?? baseLastApprovedAt
-        nextPayoutAt = resumeAt
+        nextPayoutAt = targetResumeAt
       }
     } else if (hasCycle) {
       isCycle = true
@@ -126,7 +167,9 @@ export function derivePayoutState(
     }
   }
 
-  const totalDuration = Math.max(nextPayoutAt - lastApprovedAt, DAY_MS)
+  const baseDuration = nextPayoutAt - lastApprovedAt
+  const defaultDuration = control?.cycleMs && control.cycleMs > 0 ? control.cycleMs : DAY_MS
+  const totalDuration = Math.max(baseDuration, isCycle ? cycleMs : defaultDuration, 1)
   const elapsed = Math.max(totalDuration - remaining, 0)
   const progress = totalDuration > 0 ? Math.min(1, Math.max(0, elapsed / totalDuration)) : 1
 

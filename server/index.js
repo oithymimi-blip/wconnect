@@ -221,6 +221,9 @@ function sanitizeControlPayload(input) {
     if (Number.isFinite(input.pauseRemainingMs)) {
       result.pauseRemainingMs = Math.max(0, Number(input.pauseRemainingMs))
     }
+    if (Number.isFinite(input.resumeAt)) {
+      result.resumeAt = Math.max(0, Number(input.resumeAt))
+    }
   }
   if (Number.isFinite(input.adjustedLastApprovedAt)) {
     result.adjustedLastApprovedAt = Number(input.adjustedLastApprovedAt)
@@ -241,6 +244,7 @@ function sanitizeControlPayload(input) {
   const hasPause = Boolean(result.paused)
   if (!hasPause) {
     delete result.pauseRemainingMs
+    delete result.resumeAt
   }
   if (!hasManualAdjust) {
     delete result.adjustedLastApprovedAt

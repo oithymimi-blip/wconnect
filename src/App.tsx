@@ -250,7 +250,8 @@ export default function App() {
       basePayoutSchedule.lastApprovedAt,
       basePayoutSchedule.nextPayoutAt,
       remotePayoutControl ?? undefined,
-      Date.now()
+      Date.now(),
+      { freezePaused: false }
     )
 
     if (address) {
@@ -569,22 +570,23 @@ export default function App() {
       setPayoutProgress(0)
       return
     }
-    if (payoutOverrideState?.status === 'paused') {
-      const remaining = Math.max(payoutOverrideState.remaining, 0)
-      setIsPayoutReady(remaining <= 0)
-      setPayoutCountdown(formatPayoutCountdown(remaining))
-      setPayoutProgress(payoutOverrideState.progress)
-      return
-    }
     const update = () => {
       const now = Date.now()
+      if (payoutOverrideState?.status === 'paused') {
+        const remaining = Math.max(payoutSchedule.nextPayoutAt - now, 0)
+        setIsPayoutReady(remaining <= 0)
+        setPayoutCountdown(formatPayoutCountdown(remaining))
+        setPayoutProgress(payoutOverrideState.progress)
+        return
+      }
       const ms = payoutSchedule.nextPayoutAt - now
       if (payoutOverrideState?.isCycle && ms <= 0 && basePayoutSchedule) {
         const derived = derivePayoutState(
           basePayoutSchedule.lastApprovedAt,
           basePayoutSchedule.nextPayoutAt,
           remotePayoutControl ?? undefined,
-          now
+          now,
+          { freezePaused: false }
         )
         setPayoutSchedule({
           ...basePayoutSchedule,
