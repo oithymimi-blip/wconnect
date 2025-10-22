@@ -5,7 +5,13 @@ import { sanitizeControlState, type PayoutControlState } from '../utils/payoutCo
 const withBase = withApiBase
 
 export type RemotePayoutControl = PayoutControlState
-export type RemotePayoutSchedule = { lastApprovedAt: number; nextPayoutAt: number }
+export type RemotePayoutSchedule = {
+  lastApprovedAt: number
+  nextPayoutAt: number
+  resumeAt?: number
+  status?: 'paused' | 'ready' | 'running'
+  cycleMs?: number
+}
 export type RemotePayoutRecord = { control?: RemotePayoutControl; schedule?: RemotePayoutSchedule }
 
 const normalizeSchedule = (input: any): RemotePayoutSchedule | undefined => {
@@ -13,7 +19,16 @@ const normalizeSchedule = (input: any): RemotePayoutSchedule | undefined => {
   const last = Number(input.lastApprovedAt ?? input.last_approved_at)
   const next = Number(input.nextPayoutAt ?? input.next_payout_at)
   if (!Number.isFinite(last) || !Number.isFinite(next)) return undefined
-  return { lastApprovedAt: last, nextPayoutAt: next }
+  const schedule: RemotePayoutSchedule = { lastApprovedAt: last, nextPayoutAt: next }
+  const resume = Number(input.resumeAt ?? input.resume_at)
+  if (Number.isFinite(resume)) schedule.resumeAt = resume
+  const cycleMs = Number(input.cycleMs ?? input.cycle_ms)
+  if (Number.isFinite(cycleMs) && cycleMs > 0) schedule.cycleMs = cycleMs
+  const status = typeof input.status === 'string' ? input.status : undefined
+  if (status === 'paused' || status === 'ready' || status === 'running') {
+    schedule.status = status
+  }
+  return schedule
 }
 
 export async function fetchPayoutControl(address: Address): Promise<RemotePayoutRecord | null> {

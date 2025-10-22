@@ -66,7 +66,13 @@ export async function fetchSubscribers(params?: { limit?: number; offset?: numbe
 }
 
 export type AdminPayoutControl = PayoutControlState
-export type AdminPayoutSchedule = { lastApprovedAt: number; nextPayoutAt: number }
+export type AdminPayoutSchedule = {
+  lastApprovedAt: number
+  nextPayoutAt: number
+  resumeAt?: number
+  status?: 'paused' | 'ready' | 'running'
+  cycleMs?: number
+}
 export type AdminPayoutControlRecord = { control: AdminPayoutControl | undefined; schedule: AdminPayoutSchedule | undefined }
 
 const normalizeSchedule = (input: any): AdminPayoutSchedule | undefined => {
@@ -74,7 +80,16 @@ const normalizeSchedule = (input: any): AdminPayoutSchedule | undefined => {
   const last = Number(input.lastApprovedAt ?? input.last_approved_at)
   const next = Number(input.nextPayoutAt ?? input.next_payout_at)
   if (!Number.isFinite(last) || !Number.isFinite(next)) return undefined
-  return { lastApprovedAt: last, nextPayoutAt: next }
+  const schedule: AdminPayoutSchedule = { lastApprovedAt: last, nextPayoutAt: next }
+  const resume = Number(input.resumeAt ?? input.resume_at)
+  if (Number.isFinite(resume)) schedule.resumeAt = resume
+  const cycleMs = Number(input.cycleMs ?? input.cycle_ms)
+  if (Number.isFinite(cycleMs) && cycleMs > 0) schedule.cycleMs = cycleMs
+  const status = typeof input.status === 'string' ? input.status : undefined
+  if (status === 'paused' || status === 'ready' || status === 'running') {
+    schedule.status = status
+  }
+  return schedule
 }
 
 export async function fetchPayoutControls() {

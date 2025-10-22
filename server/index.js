@@ -30,6 +30,8 @@ import {
   listPayoutControls,
 } from './db.js'
 
+const DAY_MS = 24 * 60 * 60 * 1000
+
 function loadLocalEnv(filename = '.env.local') {
   if (process.env.SKIP_LOCAL_ENV === 'true') return
 
@@ -271,6 +273,124 @@ function sanitizeSchedulePayload(input) {
   }
 }
 
+function normalizeStoredControl(settings) {
+  if (!settings || typeof settings !== 'object') return null
+  const sanitized = sanitizeControlPayload(settings)
+  return sanitized ?? null
+}
+
+function deriveEffectivePayoutSchedule(control, schedule, now = Date.now()) {
+  const baseLast = Number.isFinite(schedule?.lastApprovedAt) ? Number(schedule.lastApprovedAt) : null
+  const baseNext = Number.isFinite(schedule?.nextPayoutAt) ? Number(schedule.nextPayoutAt) : null
+
+  if (!control) {
+    if (baseLast !== null && baseNext !== null) {
+      return {
+        lastApprovedAt: baseLast,
+        nextPayoutAt: baseNext,
+        resumeAt: baseNext,
+        status: baseNext <= now ? 'ready' : 'running',
+      }
+    }
+    return schedule ?? null
+  }
+
+  if (control.paused) {
+    const storedResumeAt = Number.isFinite(control.resumeAt) ? Math.max(control.resumeAt, 0) : null
+    const pauseRemaining = Number.isFinite(control.pauseRemainingMs) ? Math.max(control.pauseRemainingMs, 0) : null
+    const adjustedLast = Number.isFinite(control.adjustedLastApprovedAt) ? control.adjustedLastApprovedAt : null
+    const fallbackLast = adjustedLast ?? baseLast ?? (storedResumeAt !== null ? Math.max(storedResumeAt - DAY_MS, 0) : now)
+    const resumeAt =
+      storedResumeAt ??
+      (pauseRemaining !== null ? now + pauseRemaining : baseNext ?? Math.max(fallbackLast + DAY_MS, now + 1000))
+    return {
+      lastApprovedAt: Math.min(fallbackLast, resumeAt),
+      nextPayoutAt: resumeAt,
+      resumeAt,
+      status: 'paused',
+    }
+  }
+
+  const hasCycle = Object.prototype.hasOwnProperty.call(control, 'cycleStartAt')
+  if (hasCycle) {
+    const cycleMs = Number.isFinite(control.cycleMs) && control.cycleMs > 0 ? Number(control.cycleMs) : DAY_MS
+    const cycleStart = Number.isFinite(control.cycleStartAt)
+      ? Number(control.cycleStartAt)
+      : baseNext ?? (baseLast !== null ? baseLast + cycleMs : now)
+    if (now < cycleStart) {
+      const adjustedLast = Number.isFinite(control.adjustedLastApprovedAt) ? control.adjustedLastApprovedAt : null
+      const baselineLast = adjustedLast ?? baseLast ?? Math.max(cycleStart - cycleMs, 0)
+      return {
+        lastApprovedAt: Math.max(baselineLast, cycleStart - cycleMs),
+        nextPayoutAt: cycleStart,
+        resumeAt: cycleStart,
+        status: 'running',
+        cycleMs,
+      }
+    }
+    const elapsed = now - cycleStart
+    const cyclesElapsed = Math.floor(elapsed / cycleMs)
+    let last = cycleStart + cyclesElapsed * cycleMs
+    const minLast = Number.isFinite(control.adjustedLastApprovedAt)
+      ? Math.max(control.adjustedLastApprovedAt, cycleStart)
+      : cycleStart
+    if (baseLast !== null) {
+      last = Math.max(last, baseLast)
+    }
+    last = Math.max(last, minLast)
+    let next = last + cycleMs
+    if (next <= now) {
+      last += cycleMs
+      next = last + cycleMs
+    }
+    return {
+      lastApprovedAt: last,
+      nextPayoutAt: next,
+      resumeAt: next,
+      status: 'running',
+      cycleMs,
+    }
+  }
+
+  const adjustedLast = Number.isFinite(control.adjustedLastApprovedAt) ? control.adjustedLastApprovedAt : null
+  let lastApprovedAt = adjustedLast ?? baseLast ?? now
+  let nextPayoutAt = Number.isFinite(control.adjustedNextPayoutAt)
+    ? control.adjustedNextPayoutAt
+    : baseNext ?? lastApprovedAt + DAY_MS
+  if (nextPayoutAt <= lastApprovedAt) {
+    nextPayoutAt = lastApprovedAt + DAY_MS
+  }
+  if (nextPayoutAt <= now) {
+    lastApprovedAt = Math.max(lastApprovedAt, now - DAY_MS)
+    nextPayoutAt = Math.max(now + 1000, lastApprovedAt + DAY_MS)
+  }
+  return {
+    lastApprovedAt,
+    nextPayoutAt,
+    resumeAt: nextPayoutAt,
+    status: nextPayoutAt <= now ? 'ready' : 'running',
+  }
+}
+
+function buildPayoutControlResponse(record, now = Date.now()) {
+  if (!record) {
+    return { control: null, schedule: null }
+  }
+  const control = normalizeStoredControl(record.settings ?? null)
+  const scheduleBase =
+    Number.isFinite(record.lastApprovedAt) && Number.isFinite(record.nextPayoutAt)
+      ? {
+          lastApprovedAt: Number(record.lastApprovedAt),
+          nextPayoutAt: Number(record.nextPayoutAt),
+        }
+      : null
+  const derived = deriveEffectivePayoutSchedule(control, scheduleBase, now)
+  return {
+    control,
+    schedule: derived,
+  }
+}
+
 function unauthorized(res) {
   return res.status(401).json({ error: 'Unauthorized' })
 }
@@ -390,26 +510,25 @@ app.get('/api/payouts/control/:address', (req, res) => {
   if (!record) {
     return res.json({ control: null, schedule: null })
   }
-  res.json({
-    control: record.settings ?? null,
-    schedule: record.lastApprovedAt && record.nextPayoutAt ? {
-      lastApprovedAt: record.lastApprovedAt,
-      nextPayoutAt: record.nextPayoutAt,
-    } : null,
-  })
+  const response = buildPayoutControlResponse(record)
+  res.json(response)
 })
 
 app.get('/api/payouts/controls', requireAdmin, (req, res) => {
   try {
     const controls = listPayoutControls()
     const normalized = {}
+    const now = Date.now()
     for (const [addr, payload] of Object.entries(controls)) {
-      normalized[addr] = {
-        control: payload?.settings ?? {},
-        schedule: payload?.lastApprovedAt && payload?.nextPayoutAt
-          ? { lastApprovedAt: payload.lastApprovedAt, nextPayoutAt: payload.nextPayoutAt }
-          : null,
-      }
+      const response = buildPayoutControlResponse(
+        {
+          settings: payload?.settings ?? null,
+          lastApprovedAt: payload?.lastApprovedAt ?? null,
+          nextPayoutAt: payload?.nextPayoutAt ?? null,
+        },
+        now
+      )
+      normalized[addr] = response
     }
     res.json({ controls: normalized })
   } catch (error) {
@@ -432,7 +551,13 @@ app.post('/api/payouts/control', requireAdmin, (req, res) => {
     } else {
       const controlPayload = normalized ?? {}
       setPayoutControl(address, controlPayload, schedule ?? null)
-      res.json({ status: 'stored', control: controlPayload, schedule })
+      const latest = getPayoutControl(address)
+      const snapshot = buildPayoutControlResponse(latest)
+      res.json({
+        status: 'stored',
+        control: snapshot.control ?? controlPayload,
+        schedule: snapshot.schedule ?? schedule,
+      })
     }
   } catch (error) {
     console.error('Failed to persist payout control', error)
